@@ -1,0 +1,135 @@
+/* Tela de agendamento — experiência de aplicativo, mobile primeiro. */
+body.app {
+  background:
+    radial-gradient(80% 50% at 50% 0%, #1b1b1e 0%, rgba(11, 11, 13, 0) 70%),
+    var(--bg);
+}
+.shell {
+  width: 100%; max-width: 520px; margin: 0 auto; height: 100vh; height: 100dvh; display: flex; flex-direction: column;
+  padding-top: env(safe-area-inset-top, 0px);
+}
+@media (min-width: 560px) {
+  body.app { padding: 28px 16px; }
+  .shell { height: min(880px, calc(100dvh - 56px)); border: 1px solid var(--line-2); border-radius: 22px; background: var(--bg-2); overflow: hidden; box-shadow: 0 30px 80px rgba(0, 0, 0, .55); padding-top: 0; }
+}
+
+.app-top { display: grid; grid-template-columns: 48px 1fr 48px; align-items: center; padding: 8px 8px 0; }
+.app-back { width: 44px; height: 44px; display: grid; place-items: center; background: none; border: 0; border-radius: 10px; font-size: 22px; color: var(--text-2); }
+.app-back:hover { background: var(--surface); color: #fff; }
+.app-logo { justify-self: center; }
+.app-logo img { height: 62px; width: auto; }
+
+.stepper { display: flex; padding: 10px 24px 4px; margin: 0; list-style: none; }
+.stepper li { flex: 1; position: relative; display: flex; flex-direction: column; align-items: center; gap: 7px; font-size: 10px; color: var(--dim); text-align: center; }
+.stepper li::before { content: ''; position: absolute; top: 5px; left: -50%; right: 50%; height: 1px; background: var(--line-2); }
+.stepper li:first-child::before { display: none; }
+.stepper li i { position: relative; z-index: 1; width: 11px; height: 11px; border-radius: 50%; border: 1px solid var(--line-2); background: var(--bg-2); transition: .25s; }
+.stepper li.feito i { background: var(--gold); border-color: var(--gold); }
+.stepper li.feito::before, .stepper li.atual::before { background: var(--gold); }
+.stepper li.atual i { border-color: var(--gold); background: var(--bg-2); box-shadow: 0 0 0 3px var(--gold-soft), inset 0 0 0 2px var(--gold); }
+.stepper li.atual, .stepper li.feito { color: var(--text-2); }
+
+.tela { flex: 1; overflow-y: auto; padding: 22px 22px 24px; -webkit-overflow-scrolling: touch; animation: entra .3s ease; }
+@keyframes entra { from { opacity: 0; transform: translateY(6px); } }
+.tela h1 { font-size: 17px; font-weight: 600; margin-bottom: 4px; outline: none; }
+.tela .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+.carregando { display: flex; align-items: center; justify-content: center; gap: 12px; color: var(--muted); padding: 60px 0; }
+.spinner { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line-2); border-top-color: var(--gold); animation: gira .8s linear infinite; }
+@keyframes gira { to { transform: rotate(360deg); } }
+
+.app-foot { padding: 12px 22px calc(14px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--line); background: rgba(16, 16, 19, .96); }
+.app-foot .total { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; font-size: 13px; color: var(--muted); }
+.app-foot .total b { color: var(--text); font-weight: 600; font-size: 14px; }
+.app-foot .btn { width: 100%; min-height: 50px; font-size: 13px; }
+
+/* etapa 1 — serviços */
+.linhas { display: flex; flex-direction: column; }
+.linha { display: grid; grid-template-columns: 22px 1fr auto auto; align-items: center; gap: 14px; padding: 15px 4px; min-height: 56px; border-bottom: 1px solid var(--line); cursor: pointer; font-size: 14px; }
+.linha:last-child { border-bottom: 0; }
+.linha input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.chk { width: 20px; height: 20px; border-radius: 4px; border: 1.5px solid var(--dim); display: grid; place-items: center; transition: .15s; color: transparent; }
+.chk .ic { width: 14px; height: 14px; stroke-width: 2.6; }
+.linha input:checked + .chk { background: var(--gold); border-color: var(--gold); color: #17130c; }
+.linha input:focus-visible + .chk { outline: 2px solid var(--gold); outline-offset: 3px; }
+.linha:hover .chk { border-color: var(--gold); }
+.linha .nome { font-weight: 500; }
+.linha .dur { color: var(--muted); font-size: 12px; }
+.linha .preco { font-weight: 600; min-width: 64px; text-align: right; font-size: 13px; }
+.linha .preco.consulta { font-size: 11px; font-weight: 500; color: var(--gold-2); }
+.combo-aviso { display: flex; gap: 10px; align-items: flex-start; margin-top: 14px; padding: 12px 14px; border: 1px solid var(--gold); background: var(--gold-soft); border-radius: 8px; font-size: 13px; color: var(--text-2); }
+.combo-aviso .ic { color: var(--gold); margin-top: 1px; }
+.combo-aviso b { color: var(--gold-2); font-weight: 600; }
+
+/* etapa 2 — calendário */
+.cal-nav { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.cal-nav strong { font-size: 15px; font-weight: 600; }
+.cal-nav button { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 10px; border: 1px solid var(--line-2); background: var(--surface); }
+.cal-nav button:disabled { opacity: .3; cursor: not-allowed; }
+.cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px 4px; text-align: center; }
+.cal .sem { font-size: 11px; color: var(--dim); padding: 4px 0 8px; font-weight: 500; }
+.dia { aspect-ratio: 1; min-height: 40px; display: grid; place-items: center; border-radius: 8px; border: 1px solid transparent; background: none; font-size: 14px; }
+.dia:not(:disabled):hover { border-color: var(--line-2); background: var(--surface); }
+.dia:disabled { color: #4a4a51; cursor: not-allowed; }
+.dia.hoje { color: var(--gold-2); font-weight: 600; }
+.dia.sel { border-color: var(--gold); background: var(--gold-soft); color: #fff; font-weight: 600; }
+.dia.vazio { visibility: hidden; }
+.legenda { display: flex; gap: 20px; margin-top: 18px; font-size: 12px; color: var(--muted); }
+.legenda span { display: inline-flex; align-items: center; gap: 8px; }
+.legenda i { width: 8px; height: 8px; border-radius: 50%; background: var(--gold); }
+.legenda .off i { background: #4a4a51; }
+
+/* etapa 3 — horários */
+.data-linha { display: flex; align-items: center; gap: 8px; color: var(--gold-2); font-size: 13px; margin-bottom: 18px; }
+.slots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.slot { min-height: 46px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--surface); font-size: 14px; font-weight: 500; transition: .15s; }
+.slot:not(:disabled):hover { border-color: var(--gold); }
+.slot[aria-pressed="true"] { border-color: var(--gold); background: var(--gold-soft); box-shadow: inset 0 0 0 1px var(--gold); color: #fff; font-weight: 600; }
+.slot:disabled { color: #4d4d54; background: transparent; border-style: dashed; border-color: var(--line); text-decoration: line-through; cursor: not-allowed; }
+.slots.skel .slot { border: 0; animation: shimmer 1.4s infinite linear; background: linear-gradient(90deg, var(--surface) 25%, var(--surface-2) 50%, var(--surface) 75%); background-size: 200% 100%; }
+.nota { margin-top: 18px; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+.vazio-msg { padding: 22px; text-align: center; border: 1px dashed var(--line-2); border-radius: 10px; color: var(--muted); font-size: 14px; }
+
+/* etapa 4 — dados */
+.campo { display: flex; flex-direction: column; gap: 7px; margin-bottom: 18px; }
+.campo label { font-size: 13px; color: var(--text-2); font-weight: 500; }
+.campo input { min-height: 50px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--surface); font-size: 16px; }
+.campo input::placeholder { color: var(--dim); }
+.campo input:focus { outline: none; border-color: var(--gold); box-shadow: 0 0 0 3px var(--gold-soft); }
+.campo input[aria-invalid="true"] { border-color: var(--err); }
+.campo .erro { color: var(--err); font-size: 12px; min-height: 0; }
+.privacidade { font-size: 12px; color: var(--dim); }
+
+/* etapa 5 — resumo / sucesso */
+.resumo { border: 1px solid var(--line-2); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.resumo h2 { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--gold-2); font-weight: 600; padding: 14px 16px 0; }
+.resumo dl { margin: 0; padding: 4px 16px 10px; }
+.resumo .par { display: flex; justify-content: space-between; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.resumo .par:last-child { border-bottom: 0; }
+.resumo dt { color: var(--muted); }
+.resumo dd { margin: 0; text-align: right; font-weight: 500; }
+.resumo .sep { height: 6px; background: var(--bg-2); border-block: 1px solid var(--line); }
+.resumo .tot dd { font-size: 16px; font-weight: 700; color: var(--gold-2); }
+.resumo .item { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; font-size: 14px; }
+.resumo .item small { color: var(--muted); }
+.alerta { display: flex; gap: 10px; padding: 12px 14px; border: 1px solid var(--err); background: rgba(229, 130, 117, .1); border-radius: 8px; font-size: 13px; margin-bottom: 16px; color: #f5c9c3; }
+.alerta .ic { color: var(--err); margin-top: 1px; }
+.sucesso { text-align: center; padding-top: 6px; }
+.sucesso .selo { width: 74px; height: 74px; margin: 0 auto 14px; border-radius: 50%; border: 1.5px solid var(--gold); display: grid; place-items: center; color: var(--gold); font-size: 40px; animation: pop .5s cubic-bezier(.2, 1.4, .4, 1); }
+.sucesso .selo .ic { width: 42px; height: 42px; }
+@keyframes pop { from { transform: scale(.5); opacity: 0; } }
+.sucesso h1 { font-size: 20px; }
+.codigo { display: inline-block; margin: 8px 0 20px; padding: 6px 14px; border: 1px dashed var(--gold); border-radius: 6px; color: var(--gold-2); font-weight: 600; letter-spacing: .1em; font-size: 15px; }
+.sucesso .resumo { text-align: left; }
+.acoes { display: flex; flex-direction: column; gap: 10px; margin-top: 20px; }
+.acoes .btn { width: 100%; min-height: 50px; }
+.acoes .link { background: none; border: 0; color: var(--muted); font-size: 13px; text-decoration: underline; padding: 10px; }
+
+.toast { position: fixed; left: 50%; bottom: calc(96px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 90; max-width: min(92vw, 440px); padding: 13px 18px; border-radius: 10px; background: #241614; border: 1px solid var(--err); color: #fbd9d4; font-size: 14px; box-shadow: 0 12px 40px rgba(0, 0, 0, .6); animation: entra .25s; }
+.toast.ok { background: #14231a; border-color: var(--ok); color: #d3f0de; }
+
+@media (max-width: 360px) {
+  .tela { padding-inline: 16px; }
+  .app-foot { padding-inline: 16px; }
+  .linha { gap: 10px; }
+  .slots { gap: 8px; }
+}

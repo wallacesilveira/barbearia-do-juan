@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Agendar horário — Barbearia do Juan</title>
+  <meta name="description" content="Agende seu horário na Barbearia do Juan: escolha os serviços, a data e o horário.">
+  <meta name="theme-color" content="#0b0b0d">
+  <link rel="icon" type="image/png" href="assets/logo/logo-128.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/agendamento.css">
+</head>
+<body class="app">
+  <div class="shell">
+    <header class="app-top">
+      <button class="app-back" type="button" id="voltar" aria-label="Voltar"><i data-icon="left"></i></button>
+      <a class="app-logo" href="index.html" aria-label="Barbearia do Juan — página inicial"><img data-logo src="assets/logo/logo-480.png" alt="Barbearia do Juan" width="58" height="60"></a>
+      <span class="app-top__space"></span>
+    </header>
+    <ol class="stepper" id="stepper" aria-label="Etapas do agendamento"></ol>
+    <main class="tela" id="tela" aria-live="polite"><div class="carregando"><span class="spinner" aria-hidden="true"></span>Carregando…</div></main>
+    <footer class="app-foot" id="rodape" hidden></footer>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="assertive" hidden></div>
+
+  <script src="js/config.js"></script>
+  <script src="js/dados-padrao.js"></script>
+  <script src="js/icons.js"></script>
+  <script src="js/availability.js"></script>
+  <script src="js/services.js"></script>
+  <script src="js/agendamento.js"></script>
+</body>
+</html>
