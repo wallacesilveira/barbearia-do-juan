@@ -16,7 +16,7 @@ window.BJ_DEFAULT_SITE = {
   "servicos_subtitulo": "Qualidade e estilo em cada detalhe.",
   "sobre_titulo": "Mais que uma barbearia, um lugar pra você.",
   "sobre_texto": "Aqui, cada corte é feito com atenção, técnica e respeito ao seu estilo. Nossa missão é fazer você se sentir bem, do jeito que você gosta.",
-  "whatsapp_msg": "Olá, Juan! Vim pelo site da Barbearia do Juan e gostaria de agendar um horário. Pode me ajudar?",
+  "whatsapp_msg": "Olá! Vim pelo site da Barbearia do Juan e gostaria de agendar um horário. Pode me ajudar?",
   "almoco_ativo": "1",
   "almoco_inicio": "12:00",
   "almoco_fim": "13:00",

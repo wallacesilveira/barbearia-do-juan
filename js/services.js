@@ -166,7 +166,7 @@
     },
     waLink(cfgSite, msg) {
       const num = String((cfgSite && cfgSite.whatsapp) || '5511988118988').replace(/\D/g, '');
-      return 'https://wa.me/' + num + '?text=' + encodeURIComponent(msg || (cfgSite && cfgSite.whatsapp_msg) || 'Olá, Juan! Vim pelo site da Barbearia do Juan e gostaria de agendar um horário. Pode me ajudar?');
+      return 'https://wa.me/' + num + '?text=' + encodeURIComponent(msg || (cfgSite && cfgSite.whatsapp_msg) || 'Olá! Vim pelo site da Barbearia do Juan e gostaria de agendar um horário. Pode me ajudar?');
     },
     preco(s) { return s.preco == null ? 'Sob consulta' : A.fmtBRL(s.preco); },
     /** Preenche textos/links marcados com data-cfg, data-cfg-src, data-wa, data-tel, data-insta, data-logo. */

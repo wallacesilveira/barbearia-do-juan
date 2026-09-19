@@ -244,7 +244,7 @@
   }
 
   function waPosAgendamento(a) {
-    const msg = `Olá, Juan! Acabei de agendar pelo site da ${S.site.config.nome || 'Barbearia do Juan'}. Seguem os dados do meu agendamento:
+    const msg = `Olá! Acabei de agendar pelo site da ${S.site.config.nome || 'Barbearia do Juan'}. Seguem os dados do meu agendamento:
 
 *Código:* ${a.codigo}
 *Data:* ${A.fmtData(a.data)}
