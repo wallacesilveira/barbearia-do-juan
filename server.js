@@ -29,6 +29,10 @@ CREATE TABLE IF NOT EXISTS servicos (
   id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, descricao TEXT DEFAULT '',
   duracao_min INTEGER NOT NULL CHECK (duracao_min BETWEEN 5 AND 600),
   preco REAL CHECK (preco IS NULL OR preco >= 0), foto TEXT DEFAULT '', ordem INTEGER DEFAULT 0, ativo INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS produtos (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, descricao TEXT DEFAULT '',
+  preco REAL NOT NULL CHECK (preco >= 0), estoque INTEGER NOT NULL DEFAULT 0 CHECK (estoque >= 0),
+  estoque_minimo INTEGER NOT NULL DEFAULT 0 CHECK (estoque_minimo >= 0), ativo INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS combos (
   id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, descricao TEXT DEFAULT '',
   preco REAL NOT NULL CHECK (preco >= 0), duracao_min INTEGER, foto TEXT DEFAULT '', ordem INTEGER DEFAULT 0, ativo INTEGER NOT NULL DEFAULT 1);
@@ -48,14 +52,77 @@ CREATE TABLE IF NOT EXISTS clientes (
 CREATE TABLE IF NOT EXISTS agendamentos (
   id INTEGER PRIMARY KEY AUTOINCREMENT, codigo TEXT NOT NULL UNIQUE, cliente_id INTEGER NOT NULL REFERENCES clientes(id),
   data TEXT NOT NULL, inicio_min INTEGER NOT NULL, fim_min INTEGER NOT NULL, duracao_min INTEGER NOT NULL,
-  valor_total REAL NOT NULL, combos_aplicados TEXT DEFAULT '', valor_consulta INTEGER NOT NULL DEFAULT 0,
+  valor_total REAL NOT NULL, valor_ajuste REAL NOT NULL DEFAULT 0, valor_produtos REAL NOT NULL DEFAULT 0,
+  lembrete_enviado_em TEXT, lembrete_envios INTEGER NOT NULL DEFAULT 0,
+  lembrete_aberto_em TEXT, lembrete_aberturas INTEGER NOT NULL DEFAULT 0,
+  combos_aplicados TEXT DEFAULT '', valor_consulta INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'confirmado' CHECK (status IN ('confirmado','cancelado')), criado_em TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS recebimentos_agendamento (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agendamento_id INTEGER NOT NULL REFERENCES agendamentos(id) ON DELETE CASCADE,
+  valor REAL NOT NULL CHECK (valor > 0),
+  forma TEXT NOT NULL CHECK (forma IN ('dinheiro','pix','cartao','outro')),
+  recebido_em TEXT NOT NULL DEFAULT (datetime('now','localtime')));
+CREATE TABLE IF NOT EXISTS agendamento_produtos (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agendamento_id INTEGER NOT NULL REFERENCES agendamentos(id) ON DELETE CASCADE,
+  produto_id INTEGER REFERENCES produtos(id) ON DELETE SET NULL,
+  nome TEXT NOT NULL, quantidade INTEGER NOT NULL CHECK (quantidade > 0),
+  preco_unitario REAL NOT NULL CHECK (preco_unitario >= 0), valor_total REAL NOT NULL CHECK (valor_total >= 0));
+CREATE TABLE IF NOT EXISTS movimentos_estoque (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  produto_id INTEGER NOT NULL REFERENCES produtos(id) ON DELETE RESTRICT,
+  quantidade INTEGER NOT NULL CHECK (quantidade <> 0), tipo TEXT NOT NULL CHECK (tipo IN ('entrada','ajuste','venda')),
+  motivo TEXT NOT NULL DEFAULT '', agendamento_id INTEGER REFERENCES agendamentos(id) ON DELETE SET NULL,
+  criado_em TEXT NOT NULL DEFAULT (datetime('now','localtime')));
+CREATE TABLE IF NOT EXISTS caixas_diarios (
+  data TEXT PRIMARY KEY,
+  valor_abertura REAL NOT NULL CHECK (valor_abertura >= 0),
+  valor_contado REAL CHECK (valor_contado IS NULL OR valor_contado >= 0),
+  diferenca REAL,
+  observacao TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'aberto' CHECK (status IN ('aberto','fechado')),
+  aberto_em TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  fechado_em TEXT);
+CREATE TABLE IF NOT EXISTS alertas (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tipo TEXT NOT NULL CHECK (tipo IN ('novo_agendamento','estoque_baixo')),
+  agendamento_id INTEGER REFERENCES agendamentos(id) ON DELETE CASCADE,
+  produto_id INTEGER REFERENCES produtos(id) ON DELETE CASCADE,
+  titulo TEXT NOT NULL, mensagem TEXT NOT NULL DEFAULT '',
+  criado_em TEXT NOT NULL DEFAULT (datetime('now','localtime')), lido_em TEXT);
+CREATE INDEX IF NOT EXISTS idx_alertas_lido ON alertas (lido_em, id);
 CREATE INDEX IF NOT EXISTS idx_agend_data ON agendamentos (data, status);
+CREATE INDEX IF NOT EXISTS idx_receb_ag ON recebimentos_agendamento (agendamento_id, recebido_em);
+CREATE INDEX IF NOT EXISTS idx_agprod_ag ON agendamento_produtos (agendamento_id, id);
+CREATE INDEX IF NOT EXISTS idx_mov_estoque_prod ON movimentos_estoque (produto_id, criado_em);
 CREATE TABLE IF NOT EXISTS agendamento_servicos (
   id INTEGER PRIMARY KEY AUTOINCREMENT, agendamento_id INTEGER NOT NULL REFERENCES agendamentos(id) ON DELETE CASCADE,
   servico_id INTEGER REFERENCES servicos(id) ON DELETE SET NULL, nome TEXT, duracao_min INTEGER, preco REAL);
 CREATE TABLE IF NOT EXISTS usuarios_admin (usuario TEXT PRIMARY KEY, senha_hash TEXT NOT NULL);
 `);
+try {
+  const cols = db.prepare('PRAGMA table_info(agendamentos)').all();
+  const temAjuste = cols.some((c) => c.name === 'valor_ajuste');
+  const temProdutos = cols.some((c) => c.name === 'valor_produtos');
+  const temLembreteEnviado = cols.some((c) => c.name === 'lembrete_enviado_em');
+  const temLembreteEnvios = cols.some((c) => c.name === 'lembrete_envios');
+  const temLembreteAberto = cols.some((c) => c.name === 'lembrete_aberto_em');
+  const temLembreteAberturas = cols.some((c) => c.name === 'lembrete_aberturas');
+  const temAntigo = cols.some((c) => c.name === 'valor_adicional');
+  if (!temAjuste && temAntigo) {
+    db.exec('ALTER TABLE agendamentos RENAME COLUMN valor_adicional TO valor_ajuste');
+  } else if (!temAjuste) {
+    db.exec('ALTER TABLE agendamentos ADD COLUMN valor_ajuste REAL NOT NULL DEFAULT 0');
+  }
+  if (!temProdutos) db.exec('ALTER TABLE agendamentos ADD COLUMN valor_produtos REAL NOT NULL DEFAULT 0');
+  if (!temLembreteEnviado) db.exec('ALTER TABLE agendamentos ADD COLUMN lembrete_enviado_em TEXT');
+  if (!temLembreteEnvios) db.exec('ALTER TABLE agendamentos ADD COLUMN lembrete_envios INTEGER NOT NULL DEFAULT 0');
+  if (!temLembreteAberto) db.exec('ALTER TABLE agendamentos ADD COLUMN lembrete_aberto_em TEXT');
+  if (!temLembreteAberturas) db.exec('ALTER TABLE agendamentos ADD COLUMN lembrete_aberturas INTEGER NOT NULL DEFAULT 0');
+} catch (e) {
+  /* coluna já existe */
+}
 
 /* --------------------------------------------------------------- dados base */
 function seed() {
@@ -151,7 +218,10 @@ function siteData(admin) {
     horarios: todos('SELECT * FROM horarios_funcionamento ORDER BY dia_semana'),
     galeria: todos(`SELECT * FROM galeria ${w} ORDER BY ordem, id`),
   };
-  if (admin) out.bloqueios = todos('SELECT * FROM bloqueios ORDER BY data, inicio_min');
+  if (admin) {
+    out.bloqueios = todos('SELECT * FROM bloqueios ORDER BY data, inicio_min');
+    out.produtos = todos('SELECT * FROM produtos ORDER BY nome COLLATE NOCASE');
+  }
   return out;
 }
 function indisponiveis(data) {
@@ -162,22 +232,167 @@ function indisponiveis(data) {
 }
 function formatarAgendamento(a) {
   const cli = db.prepare('SELECT nome, whatsapp FROM clientes WHERE id = ?').get(a.cliente_id);
+  if (cli) cli.nome = padronizarNome(cli.nome);
   const servicos = db.prepare('SELECT nome, duracao_min, preco FROM agendamento_servicos WHERE agendamento_id = ? ORDER BY id').all(a.id).map((s) => ({ ...s }));
+  const produtos = db.prepare('SELECT nome, quantidade, preco_unitario, valor_total FROM agendamento_produtos WHERE agendamento_id = ? ORDER BY id').all(a.id).map((p) => ({ ...p }));
+  const pagamentos = db.prepare('SELECT id, valor, forma, recebido_em FROM recebimentos_agendamento WHERE agendamento_id = ? ORDER BY recebido_em, id').all(a.id).map((p) => ({ ...p, valor: Number(p.valor) }));
+  const totalPago = Math.round(pagamentos.reduce((s, p) => s + p.valor, 0) * 100) / 100;
   const { cliente_id, ...resto } = a;
-  return { ...resto, valor_consulta: !!a.valor_consulta, cliente: { ...cli }, servicos };
+  return { ...resto, valor_consulta: !!a.valor_consulta, valor_ajuste: Number(a.valor_ajuste || 0), valor_produtos: Number(a.valor_produtos || 0), total_pago: totalPago, saldo_devedor: Math.max(0, Number(a.valor_total || 0) - totalPago), pagamentos, cliente: { ...cli }, servicos, produtos };
+}
+const centavos = (v) => Math.round(Number(v || 0) * 100) / 100;
+function isoMais(iso, dias) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + dias)).toISOString().slice(0, 10);
+}
+/** Intervalos de data (fuso de São Paulo) usados no Caixa. */
+function periodos() {
+  const hoje = agoraSP().data;
+  const [y, m] = hoje.split('-').map(Number);
+  const dow = new Date(hoje + 'T12:00:00Z').getUTCDay();
+  const segunda = isoMais(hoje, dow === 0 ? -6 : 1 - dow);
+  return {
+    hoje: { de: hoje, ate: hoje },
+    semana: { de: segunda, ate: isoMais(segunda, 6) },
+    mes: { de: hoje.slice(0, 7) + '-01', ate: new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10) },
+    ano: { de: `${y}-01-01`, ate: `${y}-12-31` },
+    total: { de: '0000-01-01', ate: '9999-12-31' },
+  };
+}
+function resumoCaixa() {
+  const somaPeriodo = db.prepare(`
+    SELECT COUNT(*) AS agendamentos,
+      COALESCE(SUM(valor_total - valor_ajuste - valor_produtos), 0) AS servicos,
+      COALESCE(SUM(valor_produtos), 0) AS produtos,
+      COALESCE(SUM(CASE WHEN valor_ajuste > 0 THEN valor_ajuste ELSE 0 END), 0) AS adicionais,
+      COALESCE(SUM(CASE WHEN valor_ajuste < 0 THEN -valor_ajuste ELSE 0 END), 0) AS descontos,
+      COALESCE(SUM(valor_total), 0) AS total,
+      COALESCE(SUM((SELECT SUM(r.valor) FROM recebimentos_agendamento r WHERE r.agendamento_id = agendamentos.id)), 0) AS pago
+    FROM agendamentos WHERE status = 'confirmado' AND data BETWEEN ? AND ?`);
+  const porForma = db.prepare(`SELECT forma, SUM(valor) AS total FROM recebimentos_agendamento
+    WHERE date(recebido_em) BETWEEN ? AND ? GROUP BY forma`);
+  const ranking = db.prepare(`
+    SELECT s.nome, COUNT(*) AS quantidade, COALESCE(SUM(s.preco), 0) AS valor
+    FROM agendamento_servicos s JOIN agendamentos a ON a.id = s.agendamento_id
+    WHERE a.status = 'confirmado' AND a.data BETWEEN ? AND ?
+    GROUP BY s.nome ORDER BY quantidade DESC, s.nome COLLATE NOCASE LIMIT 5`);
+
+  const out = {};
+  for (const [k, { de, ate }] of Object.entries(periodos())) {
+    const p = somaPeriodo.get(de, ate);
+    const formas = { dinheiro: 0, pix: 0, cartao: 0, outro: 0 };
+    porForma.all(de, ate).forEach((f) => { formas[f.forma] = centavos(f.total); });
+    const total = centavos(p.total);
+    out[k] = {
+      de, ate,
+      agendamentos: Number(p.agendamentos || 0),
+      servicos: centavos(p.servicos),
+      produtos: centavos(p.produtos),
+      adicionais: centavos(p.adicionais),
+      descontos: centavos(p.descontos),
+      total,
+      a_receber: centavos(Math.max(0, total - Number(p.pago || 0))),
+      ticket_medio: p.agendamentos ? centavos(total / p.agendamentos) : 0,
+      recebido: centavos(Object.values(formas).reduce((s, v) => s + v, 0)),
+      por_forma: formas,
+      servicos_mais_vendidos: ranking.all(de, ate).map((s) => ({ nome: s.nome, quantidade: Number(s.quantidade), valor: centavos(s.valor) })),
+    };
+  }
+  return out;
+}
+function resumoCaixaDiario(data) {
+  const caixa = db.prepare('SELECT * FROM caixas_diarios WHERE data = ?').get(data);
+  const recebidoDinheiro = Number(db.prepare(`SELECT COALESCE(SUM(valor), 0) AS total
+    FROM recebimentos_agendamento WHERE forma = 'dinheiro' AND date(recebido_em) = ?`).get(data).total || 0);
+  const valorAbertura = caixa ? Number(caixa.valor_abertura) : null;
+  const valorEsperado = caixa ? Math.round((valorAbertura + recebidoDinheiro) * 100) / 100 : null;
+  return {
+    data,
+    status: caixa ? caixa.status : 'nao_aberto',
+    valor_abertura: valorAbertura,
+    recebido_dinheiro: recebidoDinheiro,
+    valor_esperado: valorEsperado,
+    valor_contado: caixa && caixa.valor_contado != null ? Number(caixa.valor_contado) : null,
+    diferenca: caixa && caixa.diferenca != null ? Number(caixa.diferenca) : null,
+    observacao: caixa ? caixa.observacao : '',
+    aberto_em: caixa ? caixa.aberto_em : null,
+    fechado_em: caixa ? caixa.fechado_em : null,
+  };
+}
+/** Visita = agendamento confirmado cuja data já chegou. Cancelados e futuros não contam. */
+function clientesResumo() {
+  const hoje = agoraSP().data;
+  const clientes = db.prepare(`
+    SELECT c.id, c.nome, c.whatsapp, c.criado_em,
+      COALESCE(SUM(CASE WHEN a.status = 'confirmado' AND a.data <= :hoje THEN 1 END), 0) AS visitas,
+      COALESCE(SUM(CASE WHEN a.status = 'confirmado' AND a.data > :hoje THEN 1 END), 0) AS futuros,
+      COALESCE(SUM(CASE WHEN a.status = 'confirmado' AND a.data <= :hoje THEN a.valor_total END), 0) AS total_gasto,
+      MAX(CASE WHEN a.status = 'confirmado' AND a.data <= :hoje THEN a.data END) AS ultima_visita,
+      MIN(CASE WHEN a.status = 'confirmado' AND a.data > :hoje THEN a.data END) AS proxima_visita
+    FROM clientes c LEFT JOIN agendamentos a ON a.cliente_id = c.id
+    GROUP BY c.id
+    ORDER BY visitas DESC, total_gasto DESC, c.nome COLLATE NOCASE`).all({ hoje }).map((c) => ({
+    id: c.id,
+    nome: padronizarNome(c.nome),
+    whatsapp: c.whatsapp,
+    criado_em: c.criado_em,
+    visitas: Number(c.visitas),
+    futuros: Number(c.futuros),
+    total_gasto: centavos(c.total_gasto),
+    ultima_visita: c.ultima_visita || null,
+    proxima_visita: c.proxima_visita || null,
+  }));
+
+  // movimento por dia da semana (0 = domingo), só atendimentos que já aconteceram
+  const semana = Array.from({ length: 7 }, (_, dia) => ({ dia, agendamentos: 0 }));
+  db.prepare(`SELECT CAST(strftime('%w', data) AS INTEGER) AS dia, COUNT(*) AS n FROM agendamentos
+    WHERE status = 'confirmado' AND data <= ? GROUP BY dia`).all(hoje).forEach((r) => { semana[r.dia].agendamentos = Number(r.n); });
+  const abertos = db.prepare('SELECT dia_semana FROM horarios_funcionamento WHERE ativo = 1').all().map((h) => h.dia_semana);
+  return { clientes, semana, abertos };
+}
+
+/* ------------------------------------------------------------------ alertas */
+function criarAlerta(tipo, { agendamento_id = null, produto_id = null, titulo, mensagem = '' }) {
+  db.prepare('INSERT INTO alertas (tipo, agendamento_id, produto_id, titulo, mensagem) VALUES (?, ?, ?, ?, ?)')
+    .run(tipo, agendamento_id, produto_id, titulo, mensagem);
+}
+/** Avisa uma única vez quando o produto atinge o estoque mínimo (enquanto não for lido). */
+function alertaEstoque(produtoId) {
+  const p = db.prepare('SELECT id, nome, estoque, estoque_minimo FROM produtos WHERE id = ?').get(produtoId);
+  if (!p || p.estoque > p.estoque_minimo) return;
+  const pendente = db.prepare("SELECT 1 FROM alertas WHERE tipo = 'estoque_baixo' AND produto_id = ? AND lido_em IS NULL").get(p.id);
+  if (!pendente) criarAlerta('estoque_baixo', { produto_id: p.id, titulo: `Estoque baixo: ${p.nome}`, mensagem: `Restam ${p.estoque} unidade(s). Mínimo configurado: ${p.estoque_minimo}.` });
+}
+function listarAlertas(limite) {
+  const alertas = db.prepare(`SELECT al.*, a.codigo, a.data, a.inicio_min FROM alertas al
+    LEFT JOIN agendamentos a ON a.id = al.agendamento_id ORDER BY al.id DESC LIMIT ?`).all(limite).map((r) => ({ ...r }));
+  const naoLidos = db.prepare('SELECT COUNT(*) AS n FROM alertas WHERE lido_em IS NULL').get().n;
+  return { nao_lidos: Number(naoLidos), alertas };
 }
 class Erro extends Error { constructor(status, codigo, msg) { super(msg || codigo); this.status = status; this.codigo = codigo; } }
 
 /* -------------------------------------------------------------- agendamento */
 const DIGITOS = (s) => String(s || '').replace(/\D/g, '');
+const PARTICULAS_NOME = new Set(['da', 'das', 'de', 'do', 'dos', 'e']);
+function padronizarNome(valor) {
+  return String(valor || '').trim().replace(/\s+/g, ' ').split(' ').map((palavra, indice) => {
+    const minuscula = palavra.toLocaleLowerCase('pt-BR');
+    if (indice > 0 && PARTICULAS_NOME.has(minuscula)) return minuscula;
+    return palavra.split(/([-'])/).map((parte) => {
+      if (parte === '-' || parte === "'") return parte;
+      return parte ? parte.charAt(0).toLocaleUpperCase('pt-BR') + parte.slice(1).toLocaleLowerCase('pt-BR') : parte;
+    }).join('');
+  }).join(' ');
+}
 
 function criarAgendamento(b) {
-  const nome = String(b.nome || '').trim().replace(/\s+/g, ' ');
+  const nome = padronizarNome(b.nome);
   const wa = DIGITOS(b.whatsapp);
   if (nome.length < 3 || nome.length > 80 || wa.length < 10 || wa.length > 13) return { ok: false, erro: 'DADOS_INVALIDOS' };
   const data = String(b.data || '');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(data) || !Number.isInteger(b.inicio_min)) return { ok: false, erro: 'DADOS_INVALIDOS' };
   const ids = [...new Set((Array.isArray(b.servico_ids) ? b.servico_ids : []).map(Number))];
+  // Valores financeiros nunca vêm do site público: ajustes só existem no painel.
 
   db.exec('BEGIN IMMEDIATE'); // trava de escrita: dois pedidos nunca validam ao mesmo tempo
   try {
@@ -208,6 +423,12 @@ function criarAgendamento(b) {
         preco.linhas.filter((l) => l.tipo === 'combo').map((l) => l.nome).join(', '), preco.consulta ? 1 : 0);
     const isv = db.prepare('INSERT INTO agendamento_servicos (agendamento_id, servico_id, nome, duracao_min, preco) VALUES (?, ?, ?, ?, ?)');
     selecionados.forEach((s) => isv.run(ag.lastInsertRowid, s.id, s.nome, s.duracao_min, s.preco));
+    const [ano, mes, dia] = data.split('-');
+    criarAlerta('novo_agendamento', {
+      agendamento_id: Number(ag.lastInsertRowid),
+      titulo: `Novo agendamento: ${nome}`,
+      mensagem: `${dia}/${mes}/${ano} às ${A.fmtMin(b.inicio_min)} · ${selecionados.map((s) => s.nome).join(' + ')}`,
+    });
     db.exec('COMMIT');
     return { ok: true, agendamento: formatarAgendamento(db.prepare('SELECT * FROM agendamentos WHERE id = ?').get(ag.lastInsertRowid)) };
   } catch (e) {
@@ -216,9 +437,60 @@ function criarAgendamento(b) {
   }
 }
 
+function criarAgendamentoAdmin(b) {
+  const nome = padronizarNome(b.nome);
+  const wa = DIGITOS(b.whatsapp);
+  const data = String(b.data || '');
+  const inicioMin = Number(b.inicio_min);
+  if (!nome || nome.length > 80 || (wa && (wa.length < 10 || wa.length > 13))
+      || !/^\d{4}-\d{2}-\d{2}$/.test(data) || !Number.isInteger(inicioMin)) {
+    return { ok: false, erro: 'DADOS_INVALIDOS' };
+  }
+  const ids = [...new Set((Array.isArray(b.servico_ids) ? b.servico_ids : []).map(Number))];
+  if (!ids.length) return { ok: false, erro: 'SERVICO_INVALIDO' };
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const servicos = todos('SELECT * FROM servicos WHERE ativo = 1');
+    const selecionados = servicos.filter((s) => ids.includes(s.id));
+    if (selecionados.length !== ids.length) { db.exec('ROLLBACK'); return { ok: false, erro: 'SERVICO_INVALIDO' }; }
+    const preco = A.calcPricing(ids, servicos, getCombos(true));
+    const validacao = A.validarHorario({
+      data, inicio_min: inicioMin, duracao: preco.duracao,
+      horarios: todos('SELECT * FROM horarios_funcionamento'), config: getConfig(),
+      bloqueios: todos('SELECT * FROM bloqueios WHERE data = ?', data),
+      ocupados: db.prepare("SELECT inicio_min ini, fim_min fim FROM agendamentos WHERE data = ? AND status = 'confirmado'").all(data).map((o) => ({ ...o })),
+    });
+    if (!validacao.ok) { db.exec('ROLLBACK'); return { ok: false, erro: validacao.motivo }; }
+
+    // sem telefone, reaproveita o cliente de mesmo nome que também não tem telefone (evita duplicatas)
+    const cliente = wa
+      ? db.prepare('SELECT id FROM clientes WHERE whatsapp = ? ORDER BY id LIMIT 1').get(wa)
+      : db.prepare("SELECT id FROM clientes WHERE whatsapp = '' AND nome = ? COLLATE NOCASE ORDER BY id LIMIT 1").get(nome);
+    let clienteId;
+    if (cliente) { clienteId = cliente.id; db.prepare('UPDATE clientes SET nome = ? WHERE id = ?').run(nome, clienteId); }
+    else clienteId = db.prepare('INSERT INTO clientes (nome, whatsapp) VALUES (?, ?)').run(nome, wa).lastInsertRowid;
+
+    const codigo = 'BJ-' + crypto.randomBytes(3).toString('hex').toUpperCase();
+    const ag = db.prepare(`INSERT INTO agendamentos
+      (codigo, cliente_id, data, inicio_min, fim_min, duracao_min, valor_total, valor_ajuste, valor_produtos, combos_aplicados, valor_consulta)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`)
+      .run(codigo, clienteId, data, inicioMin, inicioMin + preco.duracao, preco.duracao, Number(preco.total),
+        preco.linhas.filter((l) => l.tipo === 'combo').map((l) => l.nome).join(', '), preco.consulta ? 1 : 0);
+    const insServico = db.prepare('INSERT INTO agendamento_servicos (agendamento_id, servico_id, nome, duracao_min, preco) VALUES (?, ?, ?, ?, ?)');
+    selecionados.forEach((s) => insServico.run(ag.lastInsertRowid, s.id, s.nome, s.duracao_min, s.preco));
+    db.exec('COMMIT');
+    return { ok: true, agendamento: formatarAgendamento(db.prepare('SELECT * FROM agendamentos WHERE id = ?').get(ag.lastInsertRowid)) };
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
+    throw e;
+  }
+}
+
 /* ---------------------------------------------------------------- admin CRUD */
 const TABELAS = {
   servicos: { cols: ['nome', 'descricao', 'duracao_min', 'preco', 'foto', 'ordem', 'ativo'], pk: 'id' },
+  produtos: { cols: ['nome', 'descricao', 'preco', 'estoque', 'estoque_minimo', 'ativo'], pk: 'id' },
   combos: { cols: ['nome', 'descricao', 'preco', 'duracao_min', 'foto', 'ordem', 'ativo'], pk: 'id' },
   horarios_funcionamento: { cols: ['ativo', 'inicio_min', 'fim_min'], pk: 'dia_semana' },
   bloqueios: { cols: ['data', 'inicio_min', 'fim_min', 'motivo'], pk: 'id' },
@@ -230,7 +502,7 @@ function limparLinha(tabela, r) {
     if (!(c in r)) continue;
     let v = r[c];
     if (c === 'ativo') v = v ? 1 : 0;
-    else if (['duracao_min', 'inicio_min', 'fim_min', 'ordem'].includes(c)) v = v === null || v === '' ? null : Math.round(Number(v));
+    else if (['duracao_min', 'inicio_min', 'fim_min', 'ordem', 'estoque', 'estoque_minimo'].includes(c)) v = v === null || v === '' ? null : Math.round(Number(v));
     else if (c === 'preco') v = v === null || v === '' ? null : Number(v);
     else v = v == null ? '' : String(v);
     if (typeof v === 'number' && Number.isNaN(v)) throw new Erro(400, 'DADOS_INVALIDOS', 'Valor numérico inválido em ' + c);
@@ -243,6 +515,26 @@ function salvar(tabela, r) {
   if (!t) throw new Erro(404, 'TABELA');
   const d = limparLinha(tabela, r);
   const chaves = Object.keys(d);
+  if (tabela === 'produtos') {
+    if (r.id && 'estoque' in r) throw new Erro(400, 'ESTOQUE_VIA_MOVIMENTO', 'Use o ajuste de estoque para registrar alterações.');
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      let id;
+      if (r.id) {
+        db.prepare(`UPDATE produtos SET ${chaves.map((c) => c + ' = ?').join(',')} WHERE id = ?`).run(...chaves.map((c) => d[c]), r.id);
+        id = Number(r.id);
+      } else {
+        id = Number(db.prepare(`INSERT INTO produtos (${chaves.join(',')}) VALUES (${chaves.map(() => '?').join(',')})`).run(...chaves.map((c) => d[c])).lastInsertRowid);
+        if (Number(d.estoque) > 0) db.prepare("INSERT INTO movimentos_estoque (produto_id, quantidade, tipo, motivo) VALUES (?, ?, 'entrada', 'Estoque inicial')").run(id, d.estoque);
+      }
+      db.exec('COMMIT');
+      return um('SELECT * FROM produtos WHERE id = ?', id);
+    } catch (e) {
+      try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
+      if (/CHECK constraint|NOT NULL constraint/.test(e.message)) throw new Erro(400, 'DADOS_INVALIDOS', 'Valores fora do permitido.');
+      throw e;
+    }
+  }
   if (tabela === 'horarios_funcionamento') {
     const dia = Number(r.dia_semana);
     db.prepare(`INSERT INTO horarios_funcionamento (dia_semana, ${chaves.join(',')}) VALUES (?, ${chaves.map(() => '?').join(',')})
@@ -257,7 +549,7 @@ function salvar(tabela, r) {
     const id = db.prepare(`INSERT INTO ${tabela} (${chaves.join(',')}) VALUES (${chaves.map(() => '?').join(',')})`).run(...chaves.map((c) => d[c])).lastInsertRowid;
     return um(`SELECT * FROM ${tabela} WHERE id = ?`, id);
   } catch (e) {
-    if (/CHECK constraint/.test(e.message)) throw new Erro(400, 'DADOS_INVALIDOS', 'Valores fora do permitido.');
+    if (/CHECK constraint|NOT NULL constraint/.test(e.message)) throw new Erro(400, 'DADOS_INVALIDOS', 'Valores fora do permitido.');
     throw e;
   }
 }
@@ -316,14 +608,226 @@ async function api(req, res, url) {
     exigeAdmin(req);
     if (m === 'POST' && rota === 'admin/logout') { sessoes.delete((req.headers.authorization || '').replace(/^Bearer /, '')); return json(res, 200, { ok: true }); }
     if (m === 'GET' && rota === 'admin/site') return json(res, 200, siteData(true));
+    if (m === 'GET' && rota === 'admin/clientes') return json(res, 200, clientesResumo());
+    if (m === 'GET' && rota === 'admin/indicadores') return json(res, 200, resumoCaixa());
+    if (m === 'GET' && rota === 'admin/alertas') {
+      const limite = Math.min(200, Math.max(1, Number(url.searchParams.get('limite')) || 50));
+      return json(res, 200, listarAlertas(limite));
+    }
+    if (m === 'POST' && rota === 'admin/alertas/lidos') {
+      const b = await lerCorpo(req);
+      const ids = (Array.isArray(b.ids) ? b.ids : []).map(Number).filter(Number.isInteger);
+      if (ids.length) db.prepare(`UPDATE alertas SET lido_em = datetime('now','localtime') WHERE lido_em IS NULL AND id IN (${ids.map(() => '?').join(',')})`).run(...ids);
+      else db.prepare("UPDATE alertas SET lido_em = datetime('now','localtime') WHERE lido_em IS NULL").run();
+      return json(res, 200, listarAlertas(50));
+    }
+    if (m === 'POST' && rota === 'admin/agendar') {
+      const resultado = criarAgendamentoAdmin(await lerCorpo(req));
+      return json(res, resultado.ok ? 200 : 409, resultado);
+    }
+    if (m === 'GET' && rota === 'admin/caixa-diario') {
+      const data = url.searchParams.get('data') || agoraSP().data;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) throw new Erro(400, 'DATA_INVALIDA');
+      return json(res, 200, resumoCaixaDiario(data));
+    }
+    if (m === 'POST' && rota === 'admin/caixa-diario/abrir') {
+      const b = await lerCorpo(req);
+      const data = String(b.data || agoraSP().data);
+      const abertura = Math.round(Number(b.valor_abertura) * 100) / 100;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(data) || !Number.isFinite(abertura) || abertura < 0 || abertura > 1e9) {
+        throw new Erro(400, 'DADOS_INVALIDOS', 'Informe uma data e um saldo inicial válido.');
+      }
+      try {
+        db.prepare('INSERT INTO caixas_diarios (data, valor_abertura, observacao) VALUES (?, ?, ?)')
+          .run(data, abertura, String(b.observacao || '').trim().slice(0, 240));
+      } catch (e) {
+        if (/UNIQUE constraint/.test(e.message)) throw new Erro(409, 'CAIXA_JA_ABERTO', 'Já existe um caixa registrado para esse dia.');
+        throw e;
+      }
+      return json(res, 200, resumoCaixaDiario(data));
+    }
+    if (m === 'POST' && rota === 'admin/caixa-diario/fechar') {
+      const b = await lerCorpo(req);
+      const data = String(b.data || agoraSP().data);
+      const contado = Math.round(Number(b.valor_contado) * 100) / 100;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(data) || !Number.isFinite(contado) || contado < 0 || contado > 1e9) {
+        throw new Erro(400, 'DADOS_INVALIDOS', 'Informe uma data e um valor contado válido.');
+      }
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const caixa = db.prepare('SELECT * FROM caixas_diarios WHERE data = ?').get(data);
+        if (!caixa) throw new Erro(404, 'CAIXA_NAO_ABERTO', 'Abra o caixa antes de fechá-lo.');
+        if (caixa.status !== 'aberto') throw new Erro(409, 'CAIXA_JA_FECHADO', 'Este caixa já foi fechado.');
+        const recebido = Number(db.prepare(`SELECT COALESCE(SUM(valor), 0) AS total
+          FROM recebimentos_agendamento WHERE forma = 'dinheiro' AND date(recebido_em) = ?`).get(data).total || 0);
+        const esperado = Math.round((Number(caixa.valor_abertura) + recebido) * 100) / 100;
+        const diferenca = Math.round((contado - esperado) * 100) / 100;
+        db.prepare("UPDATE caixas_diarios SET valor_contado = ?, diferenca = ?, status = 'fechado', fechado_em = datetime('now','localtime') WHERE data = ?")
+          .run(contado, diferenca, data);
+        db.exec('COMMIT');
+        return json(res, 200, resumoCaixaDiario(data));
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
+        throw e;
+      }
+    }
+    if (m === 'GET' && rota === 'admin/movimentos-estoque') {
+      const produtoId = Number(url.searchParams.get('produto_id'));
+      if (!Number.isInteger(produtoId) || produtoId < 1) throw new Erro(400, 'DADOS_INVALIDOS');
+      const movimentos = db.prepare(`SELECT m.id, m.quantidade, m.tipo, m.motivo, m.criado_em, a.codigo AS agendamento_codigo
+        FROM movimentos_estoque m LEFT JOIN agendamentos a ON a.id = m.agendamento_id
+        WHERE m.produto_id = ? ORDER BY m.criado_em DESC, m.id DESC LIMIT 50`).all(produtoId);
+      return json(res, 200, movimentos);
+    }
+    if (m === 'POST' && rota === 'admin/ajuste-agendamento') {
+      const b = await lerCorpo(req);
+      const id = Number(b.id);
+      const valor = Math.round(Number(b.valor_ajuste ?? 0) * 100) / 100;
+      if (!Number.isInteger(id) || id < 1 || !Number.isFinite(valor)) throw new Erro(400, 'DADOS_INVALIDOS', 'Ajuste inválido.');
+      const atual = db.prepare('SELECT status, valor_total, valor_ajuste FROM agendamentos WHERE id = ?').get(id);
+      if (!atual) throw new Erro(404, 'AGENDAMENTO_NAO_ENCONTRADO');
+      if (atual.status !== 'confirmado') throw new Erro(409, 'AGENDAMENTO_CANCELADO', 'Não é possível ajustar um agendamento cancelado.');
+      const totalBase = Number(atual.valor_total) - Number(atual.valor_ajuste || 0);
+      const novoTotal = centavos(totalBase + valor);
+      if (novoTotal < 0) throw new Erro(400, 'AJUSTE_EXCEDE_TOTAL', 'O desconto não pode deixar o total negativo.');
+      const pago = Number(db.prepare('SELECT COALESCE(SUM(valor), 0) AS t FROM recebimentos_agendamento WHERE agendamento_id = ?').get(id).t);
+      if (novoTotal < pago) throw new Erro(400, 'AJUSTE_ABAIXO_DO_PAGO', `O cliente já pagou ${pago.toFixed(2).replace('.', ',')}. O total não pode ficar abaixo disso.`);
+      db.prepare('UPDATE agendamentos SET valor_ajuste = ?, valor_total = ? WHERE id = ?').run(valor, novoTotal, id);
+      const ag = db.prepare('SELECT * FROM agendamentos WHERE id = ?').get(id);
+      return json(res, 200, formatarAgendamento(ag));
+    }
+    if (m === 'POST' && rota === 'admin/lembrete-enviado') {
+      const b = await lerCorpo(req);
+      const id = Number(b.id);
+      if (!Number.isInteger(id) || id < 1) throw new Erro(400, 'DADOS_INVALIDOS', 'Agendamento inválido.');
+      const ag = db.prepare('SELECT status FROM agendamentos WHERE id = ?').get(id);
+      if (!ag) throw new Erro(404, 'AGENDAMENTO_NAO_ENCONTRADO');
+      if (ag.status !== 'confirmado') throw new Erro(409, 'AGENDAMENTO_CANCELADO', 'Não é possível registrar lembrete de agendamento cancelado.');
+      db.prepare("UPDATE agendamentos SET lembrete_enviado_em = datetime('now','localtime'), lembrete_envios = lembrete_envios + 1 WHERE id = ?").run(id);
+      return json(res, 200, formatarAgendamento(db.prepare('SELECT * FROM agendamentos WHERE id = ?').get(id)));
+    }
+    if (m === 'POST' && rota === 'admin/lembrete-aberto') {
+      const b = await lerCorpo(req);
+      const id = Number(b.id);
+      if (!Number.isInteger(id) || id < 1) throw new Erro(400, 'DADOS_INVALIDOS', 'Agendamento inválido.');
+      const ag = db.prepare('SELECT status, data, inicio_min FROM agendamentos WHERE id = ?').get(id);
+      if (!ag) throw new Erro(404, 'AGENDAMENTO_NAO_ENCONTRADO');
+      if (ag.status !== 'confirmado') throw new Erro(409, 'AGENDAMENTO_CANCELADO', 'Não é possível abrir lembrete de agendamento cancelado.');
+      const agora = agoraSP();
+      if (ag.data < agora.data || (ag.data === agora.data && Number(ag.inicio_min) <= agora.min)) {
+        throw new Erro(409, 'AGENDAMENTO_PASSADO', 'O horário do agendamento já começou.');
+      }
+      db.prepare("UPDATE agendamentos SET lembrete_aberto_em = datetime('now','localtime'), lembrete_aberturas = lembrete_aberturas + 1 WHERE id = ?").run(id);
+      return json(res, 200, formatarAgendamento(db.prepare('SELECT * FROM agendamentos WHERE id = ?').get(id)));
+    }
+    if (m === 'POST' && rota === 'admin/recebimento') {
+      const b = await lerCorpo(req);
+      const id = Number(b.id);
+      const valor = Math.round(Number(b.valor) * 100) / 100;
+      const forma = String(b.forma || '');
+      if (!Number.isInteger(id) || id < 1 || !Number.isFinite(valor) || valor <= 0 || !['dinheiro', 'pix', 'cartao', 'outro'].includes(forma)) {
+        throw new Erro(400, 'DADOS_INVALIDOS', 'Informe valor e forma de pagamento válidos.');
+      }
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const ag = db.prepare("SELECT * FROM agendamentos WHERE id = ? AND status = 'confirmado'").get(id);
+        if (!ag) throw new Erro(404, 'AGENDAMENTO_NAO_ENCONTRADO');
+        const pago = Number(db.prepare('SELECT COALESCE(SUM(valor), 0) AS total FROM recebimentos_agendamento WHERE agendamento_id = ?').get(id).total || 0);
+        const saldo = Math.round((Number(ag.valor_total) - pago) * 100) / 100;
+        if (valor > saldo) throw new Erro(400, 'RECEBIMENTO_EXCEDE_SALDO', 'O recebimento não pode ser maior que o saldo pendente.');
+        db.prepare('INSERT INTO recebimentos_agendamento (agendamento_id, valor, forma) VALUES (?, ?, ?)').run(id, valor, forma);
+        db.exec('COMMIT');
+        return json(res, 200, formatarAgendamento(db.prepare('SELECT * FROM agendamentos WHERE id = ?').get(id)));
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
+        throw e;
+      }
+    }
+    if (m === 'POST' && rota === 'admin/estoque') {
+      const b = await lerCorpo(req);
+      const id = Number(b.produto_id);
+      const quantidade = Number(b.quantidade);
+      const tipo = String(b.tipo || '');
+      const motivo = String(b.motivo || '').trim().slice(0, 120);
+      if (!Number.isInteger(id) || id < 1 || !Number.isInteger(quantidade) || quantidade < 1 || !['entrada', 'ajuste'].includes(tipo)) {
+        throw new Erro(400, 'DADOS_INVALIDOS', 'Informe um produto, uma quantidade inteira e um tipo de movimento válidos.');
+      }
+      const delta = tipo === 'entrada' ? quantidade : -quantidade;
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const produto = db.prepare('SELECT estoque FROM produtos WHERE id = ?').get(id);
+        if (!produto) throw new Erro(404, 'PRODUTO_NAO_ENCONTRADO');
+        if (Number(produto.estoque) + delta < 0) throw new Erro(400, 'ESTOQUE_INSUFICIENTE', 'A saída não pode deixar o estoque negativo.');
+        db.prepare('UPDATE produtos SET estoque = estoque + ? WHERE id = ?').run(delta, id);
+        db.prepare('INSERT INTO movimentos_estoque (produto_id, quantidade, tipo, motivo) VALUES (?, ?, ?, ?)').run(id, delta, tipo, motivo || (tipo === 'entrada' ? 'Reposição' : 'Ajuste manual'));
+        if (delta < 0) alertaEstoque(id);
+        db.exec('COMMIT');
+        return json(res, 200, um('SELECT * FROM produtos WHERE id = ?', id));
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
+        throw e;
+      }
+    }
+    if (m === 'POST' && rota === 'admin/venda-produto') {
+      const b = await lerCorpo(req);
+      const agendamentoId = Number(b.agendamento_id);
+      const produtoId = Number(b.produto_id);
+      const quantidade = Number(b.quantidade);
+      if (!Number.isInteger(agendamentoId) || agendamentoId < 1 || !Number.isInteger(produtoId) || produtoId < 1 || !Number.isInteger(quantidade) || quantidade < 1) {
+        throw new Erro(400, 'DADOS_INVALIDOS', 'Produto e quantidade inválidos.');
+      }
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const ag = db.prepare("SELECT * FROM agendamentos WHERE id = ? AND status = 'confirmado'").get(agendamentoId);
+        if (!ag) throw new Erro(404, 'AGENDAMENTO_NAO_ENCONTRADO');
+        const produto = db.prepare('SELECT * FROM produtos WHERE id = ? AND ativo = 1').get(produtoId);
+        if (!produto) throw new Erro(404, 'PRODUTO_NAO_ENCONTRADO');
+        if (Number(produto.estoque) < quantidade) throw new Erro(400, 'ESTOQUE_INSUFICIENTE', 'Estoque insuficiente para essa venda.');
+        const unitario = Math.round(Number(produto.preco) * 100) / 100;
+        const total = Math.round(unitario * quantidade * 100) / 100;
+        db.prepare('UPDATE produtos SET estoque = estoque - ? WHERE id = ?').run(quantidade, produtoId);
+        db.prepare('INSERT INTO agendamento_produtos (agendamento_id, produto_id, nome, quantidade, preco_unitario, valor_total) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(agendamentoId, produtoId, produto.nome, quantidade, unitario, total);
+        db.prepare("INSERT INTO movimentos_estoque (produto_id, quantidade, tipo, motivo, agendamento_id) VALUES (?, ?, 'venda', ?, ?)")
+          .run(produtoId, -quantidade, `Venda no agendamento ${ag.codigo}`, agendamentoId);
+        db.prepare('UPDATE agendamentos SET valor_produtos = valor_produtos + ?, valor_total = valor_total + ? WHERE id = ?')
+          .run(total, total, agendamentoId);
+        alertaEstoque(produtoId);
+        db.exec('COMMIT');
+        return json(res, 200, formatarAgendamento(db.prepare('SELECT * FROM agendamentos WHERE id = ?').get(agendamentoId)));
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
+        throw e;
+      }
+    }
     if (m === 'GET' && rota === 'admin/agendamentos') {
       const de = url.searchParams.get('de') || '0000-01-01', ate = url.searchParams.get('ate') || '9999-12-31';
       return json(res, 200, db.prepare('SELECT * FROM agendamentos WHERE data BETWEEN ? AND ? ORDER BY data, inicio_min').all(de, ate).map((a) => formatarAgendamento({ ...a })));
     }
     if (m === 'POST' && rota === 'admin/cancelar') {
-      const b = await lerCorpo(req);
-      db.prepare("UPDATE agendamentos SET status = 'cancelado' WHERE id = ?").run(Number(b.id));
-      return json(res, 200, { ok: true });
+      const id = Number((await lerCorpo(req)).id);
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const ag = db.prepare('SELECT id, codigo, status FROM agendamentos WHERE id = ?').get(id);
+        if (!ag) throw new Erro(404, 'AGENDAMENTO_NAO_ENCONTRADO');
+        let devolvidos = 0;
+        if (ag.status === 'confirmado') {
+          db.prepare("UPDATE agendamentos SET status = 'cancelado' WHERE id = ?").run(id);
+          // produtos vendidos na comanda voltam para o estoque
+          const itens = db.prepare('SELECT produto_id, quantidade FROM agendamento_produtos WHERE agendamento_id = ? AND produto_id IS NOT NULL').all(id);
+          for (const it of itens) {
+            db.prepare('UPDATE produtos SET estoque = estoque + ? WHERE id = ?').run(it.quantidade, it.produto_id);
+            db.prepare("INSERT INTO movimentos_estoque (produto_id, quantidade, tipo, motivo, agendamento_id) VALUES (?, ?, 'entrada', ?, ?)")
+              .run(it.produto_id, it.quantidade, `Devolução: agendamento ${ag.codigo} cancelado`, id);
+            devolvidos += Number(it.quantidade);
+          }
+        }
+        db.exec('COMMIT');
+        return json(res, 200, { ok: true, produtos_devolvidos: devolvidos });
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
+        throw e;
+      }
     }
     if (m === 'POST' && rota === 'admin/config') {
       const b = await lerCorpo(req);
@@ -349,7 +853,12 @@ async function api(req, res, url) {
       const t = TABELAS[mm[1]];
       if (!t) throw new Erro(404, 'TABELA');
       const b = await lerCorpo(req);
-      db.prepare(`DELETE FROM ${mm[1]} WHERE ${t.pk} = ?`).run(Number(b.id));
+      try {
+        db.prepare(`DELETE FROM ${mm[1]} WHERE ${t.pk} = ?`).run(Number(b.id));
+      } catch (e) {
+        if (/FOREIGN KEY/.test(e.message)) throw new Erro(409, 'EM_USO', 'Este item tem histórico e não pode ser excluído. Desative-o para escondê-lo.');
+        throw e;
+      }
       return json(res, 200, { ok: true });
     }
   }

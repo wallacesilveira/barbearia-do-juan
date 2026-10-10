@@ -31,11 +31,18 @@
   <div class="adm" id="painel" hidden>
     <aside class="side" id="side" aria-label="Menu do painel">
       <div class="side__marca"><img src="assets/logo/logo-480.png" alt="" width="64" height="66"><span>BARBEARIA DO JUAN</span></div>
-      <nav class="side__nav" id="nav">
-        <a href="#/dashboard" data-v="dashboard"><i data-icon="home"></i>Dashboard</a>
-        <a href="#/agendamentos" data-v="agendamentos"><i data-icon="calendar"></i>Agendamentos</a>
+      <nav class="side__nav" id="nav" aria-label="Seções do painel">
+        <span class="side__grupo">Operação</span>
+        <a href="#/dashboard" data-v="dashboard"><i data-icon="home"></i>Hoje</a>
+        <a href="#/agendamentos" data-v="agendamentos"><i data-icon="calendar"></i>Agenda</a>
+        <a href="#/caixa" data-v="caixa"><i data-icon="wallet"></i>Caixa</a>
+        <a href="#/clientes" data-v="clientes"><i data-icon="users"></i>Clientes</a>
+        <a href="#/alertas" data-v="alertas"><i data-icon="bell"></i>Alertas<span class="badge" data-badge-alertas hidden></span></a>
+        <span class="side__grupo">Catálogo</span>
         <a href="#/servicos" data-v="servicos"><i data-icon="scissors"></i>Serviços</a>
         <a href="#/combos" data-v="combos"><i data-icon="layers"></i>Combos</a>
+        <a href="#/produtos" data-v="produtos"><i data-icon="box"></i>Produtos</a>
+        <span class="side__grupo">Ajustes</span>
         <a href="#/horarios" data-v="horarios"><i data-icon="clock"></i>Horários</a>
         <a href="#/bloqueios" data-v="bloqueios"><i data-icon="ban"></i>Bloqueios</a>
         <a href="#/galeria" data-v="galeria"><i data-icon="image"></i>Galeria</a>
@@ -50,7 +57,8 @@
     <div class="principal">
       <header class="topo">
         <button type="button" class="topo__menu" id="abrir-menu" aria-label="Abrir menu" aria-controls="side"><i data-icon="menu"></i></button>
-        <span class="topo__titulo" id="titulo-topo">Dashboard</span>
+        <span class="topo__titulo" id="titulo-topo">Hoje</span>
+        <a class="topo__sino" href="#/alertas" aria-label="Alertas"><i data-icon="bell"></i><span class="badge" data-badge-alertas hidden></span></a>
       </header>
       <main class="conteudo" id="conteudo" tabindex="-1" aria-live="polite"></main>
     </div>

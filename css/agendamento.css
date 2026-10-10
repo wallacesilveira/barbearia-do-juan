@@ -16,6 +16,9 @@ body.app {
 .app-top { display: grid; grid-template-columns: 48px 1fr 48px; align-items: center; padding: 8px 8px 0; }
 .app-back { width: 44px; height: 44px; display: grid; place-items: center; background: none; border: 0; border-radius: 10px; font-size: 22px; color: var(--text-2); }
 .app-back:hover { background: var(--surface); color: #fff; }
+.app-close { width: 44px; height: 44px; display: grid; place-items: center; justify-self: end; background: none; border: 0; border-radius: 10px; color: var(--text-2); }
+.app-close .ic { width: 20px; height: 20px; }
+.app-close:hover { background: var(--surface); color: #fff; }
 .app-logo { justify-self: center; }
 .app-logo img { height: 62px; width: auto; }
 
@@ -44,7 +47,7 @@ body.app {
 
 /* etapa 1 — serviços */
 .linhas { display: flex; flex-direction: column; }
-.linha { display: grid; grid-template-columns: 22px 1fr auto auto; align-items: center; gap: 14px; padding: 15px 4px; min-height: 56px; border-bottom: 1px solid var(--line); cursor: pointer; font-size: 14px; }
+.linha { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 15px 4px; min-height: 56px; border-bottom: 1px solid var(--line); cursor: pointer; font-size: 14px; }
 .linha:last-child { border-bottom: 0; }
 .linha input { position: absolute; opacity: 0; width: 1px; height: 1px; }
 .chk { width: 20px; height: 20px; border-radius: 4px; border: 1.5px solid var(--dim); display: grid; place-items: center; transition: .15s; color: transparent; }

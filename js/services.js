@@ -58,11 +58,26 @@
         throw e;
       }
     },
+    agendarAdmin(dados) { return this._post('admin/agendar', dados); },
 
     async entrar(usuario, senha) { const r = await this._post('admin/login', { usuario, senha }); guardar.set(r.token); },
     async sair() { try { await this._post('admin/logout'); } catch { /* ignora */ } guardar.set(null); },
     logado() { return !!guardar.get(); },
     carregarAdmin() { return this._get('admin/site'); },
+    clientes() { return this._get('admin/clientes'); },
+    caixa() { return this._get('admin/indicadores'); },
+    alertas() { return this._get('admin/alertas'); },
+    marcarAlertasLidos(ids) { return this._post('admin/alertas/lidos', { ids: ids || [] }); },
+    caixaDiario(data) { return this._get('admin/caixa-diario?data=' + data); },
+    abrirCaixa(data, valor, observacao) { return this._post('admin/caixa-diario/abrir', { data, valor_abertura: valor, observacao }); },
+    fecharCaixa(data, valor) { return this._post('admin/caixa-diario/fechar', { data, valor_contado: valor }); },
+    ajusteAgendamento(id, valor) { return this._post('admin/ajuste-agendamento', { id, valor_ajuste: valor }); },
+    marcarLembreteEnviado(id) { return this._post('admin/lembrete-enviado', { id }); },
+    registrarAberturaLembrete(id) { return this._post('admin/lembrete-aberto', { id }); },
+    registrarRecebimento(id, valor, forma) { return this._post('admin/recebimento', { id, valor, forma }); },
+    movimentarEstoque(produtoId, quantidade, tipo, motivo) { return this._post('admin/estoque', { produto_id: produtoId, quantidade, tipo, motivo }); },
+    venderProduto(agendamentoId, produtoId, quantidade) { return this._post('admin/venda-produto', { agendamento_id: agendamentoId, produto_id: produtoId, quantidade }); },
+    movimentosEstoque(produtoId) { return this._get('admin/movimentos-estoque?produto_id=' + produtoId); },
     agendamentos(de, ate) { return this._get(`admin/agendamentos?de=${de}&ate=${ate}`); },
     cancelar(id) { return this._post('admin/cancelar', { id }); },
     salvar(tabela, linha) { return this._post('admin/salvar/' + tabela, linha); },
@@ -72,14 +87,36 @@
   };
 
   /* -------------------------------------------------------------- Supabase */
+  // O token do Supabase vale ~1 h; guardamos o refresh_token para renovar sem pedir login de novo.
+  const sessaoSupa = {
+    get() { try { return JSON.parse(sessionStorage.getItem(TOKEN_KEY + '_supa') || 'null'); } catch { return null; } },
+    set(s) { try { s ? sessionStorage.setItem(TOKEN_KEY + '_supa', JSON.stringify(s)) : sessionStorage.removeItem(TOKEN_KEY + '_supa'); } catch { /* sem storage */ } },
+  };
+  let renovando = null;
+  async function renovarSessao() {
+    const s = sessaoSupa.get();
+    if (!s || !s.refresh) return false;
+    if (Date.now() < s.expira - 120e3) return true; // ainda válido por mais de 2 min
+    renovando = renovando || pedir(cfg.supabaseUrl + '/auth/v1/token?grant_type=refresh_token', {
+      method: 'POST', headers: { apikey: cfg.supabaseKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ refresh_token: s.refresh }),
+    }).then((r) => { guardarSessaoSupa(r); return true; }).catch(() => false).finally(() => { renovando = null; });
+    return renovando;
+  }
+  function guardarSessaoSupa(r) {
+    guardar.set(r.access_token);
+    sessaoSupa.set({ refresh: r.refresh_token, expira: Date.now() + (Number(r.expires_in) || 3600) * 1000 });
+  }
+
   const Supa = {
     nome: 'supabase',
     _h(extra) {
       return { apikey: cfg.supabaseKey, Authorization: 'Bearer ' + (guardar.get() || cfg.supabaseKey), 'Content-Type': 'application/json', ...extra };
     },
-    _rest(caminho, opts = {}) {
+    async _rest(caminho, opts = {}) {
+      if (guardar.get()) await renovarSessao();
       return pedir(cfg.supabaseUrl + '/rest/v1/' + caminho, { ...opts, headers: this._h(opts.headers) }).catch((e) => {
-        if (e.status === 401 && guardar.get()) { guardar.set(null); window.dispatchEvent(new Event('bj:sessao-expirada')); }
+        // só encerra a sessão quando o próprio JWT foi recusado (expirado/inválido)
+        if (e.status === 401 && guardar.get() && /JWT|jwt|token/.test(e.message + e.codigo)) { guardar.set(null); sessaoSupa.set(null); window.dispatchEvent(new Event('bj:sessao-expirada')); }
         throw e;
       });
     },
@@ -87,19 +124,23 @@
 
     async _site(admin) {
       const filtro = admin ? '' : '&ativo=eq.true';
-      const [conf, servicos, combos, horarios, galeria] = await Promise.all([
+      const [conf, servicos, combos, horarios, galeria, produtos] = await Promise.all([
         this._rest('configuracoes?select=chave,valor'),
         this._rest('servicos?select=*&order=ordem,id' + filtro),
         this._rest('combos?select=*,combo_servicos(servico_id)&order=ordem,id' + filtro),
         this._rest('horarios_funcionamento?select=*&order=dia_semana'),
         this._rest('galeria?select=*&order=ordem,id' + filtro),
+        admin ? this._rest('produtos?select=*&order=nome') : Promise.resolve([]),
       ]);
       const out = {
         config: Object.fromEntries(conf.map((r) => [r.chave, r.valor])),
         servicos, horarios, galeria,
         combos: combos.map(({ combo_servicos, ...c }) => ({ ...c, servico_ids: combo_servicos.map((x) => x.servico_id) })),
       };
-      if (admin) out.bloqueios = await this._rest('bloqueios?select=*&order=data,inicio_min');
+      if (admin) {
+        out.bloqueios = await this._rest('bloqueios?select=*&order=data,inicio_min');
+        out.produtos = produtos;
+      }
       return out;
     },
     carregarSite() { return this._site(false); },
@@ -108,26 +149,59 @@
     async agendar(d) {
       return this._rpc('criar_agendamento', { p_data: d.data, p_inicio_min: d.inicio_min, p_servico_ids: d.servico_ids, p_nome: d.nome, p_whatsapp: d.whatsapp });
     },
+    agendarAdmin(d) { return this._rpc('criar_agendamento_admin', { p_data: d.data, p_inicio_min: d.inicio_min, p_servico_ids: d.servico_ids, p_nome: d.nome, p_whatsapp: d.whatsapp || '' }); },
 
     async entrar(email, senha) {
       const r = await pedir(cfg.supabaseUrl + '/auth/v1/token?grant_type=password', {
         method: 'POST', headers: { apikey: cfg.supabaseKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password: senha }),
       }).catch((e) => { throw new ApiError(e.status === 400 ? 401 : e.status, 'CREDENCIAIS', 'E-mail ou senha incorretos.'); });
-      guardar.set(r.access_token);
+      guardarSessaoSupa(r);
       try { // precisa estar na tabela usuarios_admin
         const eu = await this._rest('usuarios_admin?select=user_id');
         if (!eu.length) throw new ApiError(403, 'SEM_PERMISSAO', 'Este usuário não é administrador.');
-      } catch (e) { guardar.set(null); throw e; }
+      } catch (e) { guardar.set(null); sessaoSupa.set(null); throw e; }
     },
-    async sair() { guardar.set(null); },
+    async sair() {
+      const t = guardar.get();
+      guardar.set(null); sessaoSupa.set(null);
+      if (t) pedir(cfg.supabaseUrl + '/auth/v1/logout', { method: 'POST', headers: { apikey: cfg.supabaseKey, Authorization: 'Bearer ' + t } }).catch(() => {});
+    },
     logado() { return !!guardar.get(); },
     agendamentos(de, ate) {
-      return this._rest(`agendamentos?select=*,clientes(nome,whatsapp),agendamento_servicos(nome,duracao_min,preco)&data=gte.${de}&data=lte.${ate}&order=data,inicio_min`)
-        .then((l) => l.map(({ clientes, agendamento_servicos, cliente_id, ...a }) => ({ ...a, cliente: clientes, servicos: agendamento_servicos })));
+      return this._rest(`agendamentos?select=*,clientes(nome,whatsapp),agendamento_servicos(nome,duracao_min,preco),agendamento_produtos(nome,quantidade,preco_unitario,valor_total),recebimentos_agendamento(id,valor,forma,recebido_em)&data=gte.${de}&data=lte.${ate}&order=data,inicio_min`)
+        .then((l) => l.map(({ clientes, agendamento_servicos, agendamento_produtos, recebimentos_agendamento, cliente_id, ...a }) => {
+          const pagamentos = (recebimentos_agendamento || []).map((p) => ({ ...p, valor: Number(p.valor) }));
+          const totalPago = Math.round(pagamentos.reduce((s, p) => s + p.valor, 0) * 100) / 100;
+          const produtos = (agendamento_produtos || []).map((p) => ({ ...p, preco_unitario: Number(p.preco_unitario), valor_total: Number(p.valor_total) }));
+          return { ...a, valor_ajuste: Number(a.valor_ajuste || 0), valor_produtos: Number(a.valor_produtos || 0), cliente: clientes, servicos: agendamento_servicos, produtos, pagamentos, total_pago: totalPago, saldo_devedor: Math.max(0, Number(a.valor_total || 0) - totalPago) };
+        }));
     },
-    cancelar(id) { return this._rest('agendamentos?id=eq.' + id, { method: 'PATCH', body: JSON.stringify({ status: 'cancelado' }) }); },
+    cancelar(id) { return this._rpc('cancelar_agendamento', { p_agendamento_id: id }); },
+    async clientes() {
+      const r = await this._rpc('clientes_resumo', {});
+      return { ...r, clientes: r.clientes.map((c) => ({ ...c, total_gasto: Number(c.total_gasto) })) };
+    },
+    async alertas() {
+      const [alertas, naoLidos] = await Promise.all([
+        this._rest('alertas?select=*,agendamentos(codigo,data,inicio_min)&order=id.desc&limit=50'),
+        this._rest('alertas?select=id&lido_em=is.null'),
+      ]);
+      return { nao_lidos: naoLidos.length, alertas: alertas.map(({ agendamentos, ...a }) => ({ ...a, ...(agendamentos || {}) })) };
+    },
+    async marcarAlertasLidos(ids) {
+      const filtro = ids && ids.length ? `&id=in.(${ids.map(Number).join(',')})` : '';
+      await this._rest('alertas?lido_em=is.null' + filtro, { method: 'PATCH', body: JSON.stringify({ lido_em: new Date().toISOString() }) });
+      return this.alertas();
+    },
     async salvar(tabela, linha) {
       const { id, ...resto } = linha;
+      if (tabela === 'produtos' && !id) {
+        return this._rpc('criar_produto', {
+          p_nome: linha.nome, p_descricao: linha.descricao, p_preco: linha.preco,
+          p_estoque_inicial: linha.estoque || 0, p_estoque_minimo: linha.estoque_minimo,
+          p_ativo: linha.ativo,
+        });
+      }
       let r;
       if (tabela === 'horarios_funcionamento') {
         r = await this._rest('horarios_funcionamento?on_conflict=dia_semana', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=representation' }, body: JSON.stringify(linha) });
@@ -138,6 +212,17 @@
       }
       return r[0];
     },
+    ajusteAgendamento(id, valor) { return this._rpc('ajustar_agendamento', { p_id: id, p_valor: valor }); },
+    marcarLembreteEnviado(id) { return this._rpc('marcar_lembrete_enviado', { p_agendamento_id: id }); },
+    registrarAberturaLembrete(id) { return this._rpc('registrar_abertura_lembrete', { p_agendamento_id: id }); },
+    registrarRecebimento(id, valor, forma) { return this._rpc('registrar_recebimento', { p_agendamento_id: id, p_valor: valor, p_forma: forma }); },
+    movimentarEstoque(produtoId, quantidade, tipo, motivo) { return this._rpc('movimentar_estoque', { p_produto_id: produtoId, p_quantidade: quantidade, p_tipo: tipo, p_motivo: motivo }); },
+    venderProduto(agendamentoId, produtoId, quantidade) { return this._rpc('vender_produto_agendamento', { p_agendamento_id: agendamentoId, p_produto_id: produtoId, p_quantidade: quantidade }); },
+    movimentosEstoque(produtoId) { return this._rest(`movimentos_estoque?select=id,quantidade,tipo,motivo,criado_em,agendamentos(codigo)&produto_id=eq.${produtoId}&order=criado_em.desc&limit=50`).then((l) => l.map((m) => ({ ...m, agendamento_codigo: m.agendamentos && m.agendamentos.codigo }))); },
+    caixa() { return this._rpc('caixa_resumo', {}); },
+    caixaDiario(data) { return this._rpc('caixa_diario_resumo', { p_data: data }); },
+    abrirCaixa(data, valor, observacao) { return this._rpc('abrir_caixa_diario', { p_data: data, p_valor_abertura: valor, p_observacao: observacao }); },
+    fecharCaixa(data, valor) { return this._rpc('fechar_caixa_diario', { p_data: data, p_valor_contado: valor }); },
     excluir(tabela, id) {
       const pk = tabela === 'horarios_funcionamento' ? 'dia_semana' : 'id';
       return this._rest(`${tabela}?${pk}=eq.${id}`, { method: 'DELETE' });
@@ -159,6 +244,17 @@
   const A = window.BJAvail;
   window.BJ = {
     esc(s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); },
+    nome(s) {
+      const particulas = new Set(['da', 'das', 'de', 'do', 'dos', 'e']);
+      return String(s ?? '').trim().replace(/\s+/g, ' ').split(' ').map((palavra, indice) => {
+        const minuscula = palavra.toLocaleLowerCase('pt-BR');
+        if (indice > 0 && particulas.has(minuscula)) return minuscula;
+        return palavra.split(/([-'])/).map((parte) => {
+          if (parte === '-' || parte === "'") return parte;
+          return parte ? parte.charAt(0).toLocaleUpperCase('pt-BR') + parte.slice(1).toLocaleLowerCase('pt-BR') : parte;
+        }).join('');
+      }).join(' ');
+    },
     /** Aceita só caminhos relativos do site ou data:image/. Bloqueia javascript: e outros esquemas. */
     src(u) {
       u = String(u || '');

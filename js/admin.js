@@ -1,4 +1,4 @@
-/* Painel administrativo — Dashboard, Agendamentos, Serviços, Combos, Horários, Bloqueios, Galeria, Configurações. */
+/* Painel administrativo — Hoje, Agenda, Caixa, Clientes, Alertas, catálogo (serviços, combos, produtos) e ajustes. */
 (function () {
   'use strict';
   const A = window.BJAvail;
@@ -6,21 +6,29 @@
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
-  let D = { config: {}, servicos: [], combos: [], horarios: [], galeria: [], bloqueios: [] };
-  const S = { dia: null, mes: null, diaAg: null, mostrarCancelados: false, mostrarPassados: false, ag: new Map() };
+  let D = { config: {}, servicos: [], produtos: [], combos: [], horarios: [], galeria: [], bloqueios: [] };
+  const S = {
+    dia: null, mes: null, diaAg: null, mostrarCancelados: false, mostrarPassados: false, ag: new Map(),
+    periodo: 'hoje', buscaCli: '', ordemCli: 'visitas', limiteCli: 30,
+    alertas: { nao_lidos: 0, alertas: [] }, ultimoAlerta: null, timerAlertas: null,
+  };
   let rotaAtual = 'dashboard';
   let ordemDias = [1, 2, 3, 4, 5, 6, 0];
+  const TITULO_BASE = document.title;
 
   BJIcons.hydrate();
 
   /* ------------------------------------------------------------ utilidades */
   const hojeIso = () => A.isoDate(new Date());
+  const minAgora = () => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); };
   const dataLonga = (iso) => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }); };
   const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  const dataCurta = (iso) => { const [y, m, d] = iso.split('-').map(Number); return cap(new Date(y, m - 1, d).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' }).replace('.', '')); };
   const brl = (v) => (v == null ? 'Sob consulta' : A.fmtBRL(v));
-  const numBR = (s) => { s = String(s).trim().replace(/\./g, '').replace(',', '.'); return s === '' ? null : Number(s); };
+  const numBR = (s) => { s = String(s).trim().replace(/\s|R\$/g, ''); if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.'); return s === '' ? null : Number(s); };
   const fmtNum = (v) => (v == null ? '' : String(v).replace('.', ','));
   const digitos = (s) => String(s || '').replace(/\D/g, '');
+  const centavos = (v) => Math.round(Number(v || 0) * 100) / 100;
   function fmtTel(s) {
     let d = digitos(s); if (d.length > 11 && d.startsWith('55')) d = d.slice(2);
     if (d.length === 11) return `(${d.slice(0, 2)}) ${d[2]} ${d.slice(3, 7)}-${d.slice(7)}`;
@@ -29,6 +37,46 @@
   }
   const waCliente = (s) => { let d = digitos(s); if (d.length <= 11) d = '55' + d; return 'https://wa.me/' + d; };
   const pick = (o, cols) => Object.fromEntries(cols.filter((c) => c in o).map((c) => [c, o[c]]));
+  const iniciais = (nome) => String(nome || '').trim().split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]).join('').toUpperCase() || '?';
+  const plural = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;
+  const FORMAS = { dinheiro: 'Dinheiro', pix: 'Pix', cartao: 'Cartão', outro: 'Outro' };
+
+  /** Converte data/hora do banco em Date. No SQLite local, "utc" indica colunas gravadas com CURRENT_TIMESTAMP. */
+  function paraData(s, utc) {
+    if (!s) return null;
+    let t = String(s);
+    if (!/[zZ]$|[+-]\d{2}:?\d{2}$/.test(t)) t = t.replace(' ', 'T') + (utc ? 'Z' : '');
+    const d = new Date(t);
+    return isNaN(d) ? null : d;
+  }
+  function quando(s, utc) {
+    const d = paraData(s, utc);
+    return d ? d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }).replace(',', ' às') : '';
+  }
+  function relativo(s) {
+    const d = paraData(s); if (!d) return '';
+    const min = Math.round((Date.now() - d.getTime()) / 60000);
+    if (min < 1) return 'agora';
+    if (min < 60) return `há ${min} min`;
+    if (min < 24 * 60) return `há ${Math.round(min / 60)} h`;
+    return quando(s);
+  }
+  const valorAg = (a, v = a.valor_total) => (a.valor_consulta ? (Number(v) ? A.fmtBRL(v) + ' + a consultar' : 'A consultar') : A.fmtBRL(v));
+
+  /** Situação financeira do agendamento: [rótulo, variante]. */
+  function situacao(a) {
+    if (a.status === 'cancelado') return ['Cancelado', 'err'];
+    const total = Number(a.valor_total || 0), pago = Number(a.total_pago || 0);
+    if (a.valor_consulta && !total && !pago) return ['A consultar', 'muted'];
+    if (total > 0 && pago >= total - 0.004) return ['Pago', 'ok'];
+    if (pago > 0) return ['Parcial', 'warn'];
+    return ['A receber', 'muted'];
+  }
+  const pill = ([txt, tipo]) => `<span class="pill pill--${tipo}">${esc(txt)}</span>`;
+  const kpi = (rotulo, valor, sub = '', cls = '') => `<div class="kpi${cls ? ' ' + cls : ''}"><span class="kpi__rotulo">${rotulo}</span><b class="kpi__valor">${valor}</b>${sub ? `<span class="kpi__sub">${sub}</span>` : ''}</div>`;
+  const barra = (rotulo, valor, max, texto, cls = '') => `<div class="barra${cls ? ' ' + cls : ''}"><div class="barra__topo"><span>${rotulo}</span><b>${texto}</b></div>
+    <div class="barra__trilho"><span style="width:${valor > 0 && max > 0 ? Math.max(3, Math.round((valor / max) * 100)) : 0}%"></span></div></div>`;
+  const vazio = (icone, titulo, texto = '', acao = '') => `<div class="estado-vazio">${BJIcons.svg(icone)}<strong>${titulo}</strong>${texto ? `<p>${texto}</p>` : ''}${acao}</div>`;
 
   function toast(msg, ok = true) {
     const t = $('#toast');
@@ -36,11 +84,37 @@
     clearTimeout(toast.t); toast.t = setTimeout(() => { t.hidden = true; }, ok ? 3500 : 7000);
   }
 
+  const ERROS = {
+    AJUSTE_ABAIXO_DO_PAGO: 'O total não pode ficar abaixo do que o cliente já pagou.',
+    AJUSTE_EXCEDE_TOTAL: 'O desconto não pode ser maior que o valor da comanda.',
+    RECEBIMENTO_EXCEDE_SALDO: 'O valor é maior do que falta receber.',
+    RECEBIMENTO_INVALIDO: 'Confira o valor e a forma de pagamento.',
+    ESTOQUE_INSUFICIENTE: 'Não há estoque suficiente para essa quantidade.',
+    CAIXA_JA_ABERTO: 'O caixa deste dia já foi aberto.',
+    CAIXA_JA_FECHADO: 'Este caixa já foi fechado.',
+    CAIXA_NAO_ABERTO: 'Abra o caixa antes de fechá-lo.',
+    AGENDAMENTO_CANCELADO: 'Este agendamento está cancelado.',
+    AGENDAMENTO_PASSADO: 'O horário deste agendamento já passou.',
+    AGENDAMENTO_NAO_ENCONTRADO: 'Agendamento não encontrado. Atualize a página.',
+    PRODUTO_NAO_ENCONTRADO: 'Produto indisponível. Atualize a página.',
+    EM_USO: 'Este item tem histórico e não pode ser excluído. Desative-o para escondê-lo.',
+    23503: 'Este item tem histórico e não pode ser excluído. Desative-o para escondê-lo.',
+    REDE: 'Sem conexão com o servidor. Verifique a internet e tente de novo.',
+  };
+  /** Mensagem amigável para erros do servidor local (código + mensagem) e do Supabase (mensagem = código). */
+  function textoErro(e) {
+    if (!e) return 'Algo deu errado. Tente novamente.';
+    if (ERROS[e.message]) return ERROS[e.message];
+    if (/^\d{5}$/.test(e.codigo || '') && ERROS[e.codigo]) return ERROS[e.codigo];
+    if (e.message && e.message !== e.codigo && !/^[A-Z_]+$/.test(e.message)) return e.message;
+    return ERROS[e.codigo] || 'Algo deu errado. Tente novamente.';
+  }
+
   /** Executa uma ação; trata sessão expirada e mostra erros. */
-  async function seguro(fn, msgErro) {
+  async function seguro(fn) {
     try { return await fn(); } catch (e) {
       if (e.status === 401) { mostrarLogin('Sua sessão expirou. Entre novamente.'); return undefined; }
-      toast((msgErro ? msgErro + ' ' : '') + (e.message || 'Erro inesperado.'), false);
+      toast(textoErro(e), false);
       return undefined;
     }
   }
@@ -52,10 +126,12 @@
   function abrirModal({ titulo, corpo, rodape, enviar, aberto }) {
     $('#modal-titulo').textContent = titulo;
     $('#modal-corpo').innerHTML = corpo;
+    $('#modal-corpo').onchange = null; $('#modal-corpo').oninput = null; $('#modal-corpo').onclick = null;
     $('#modal-rodape').innerHTML = rodape || '<button type="button" class="btn" data-fechar>Fechar</button>';
     aoEnviar = enviar || null;
     BJIcons.hydrate(modal);
     if (!modal.open) modal.showModal();
+    $('#modal-corpo').scrollTop = 0;
     if (aberto) aberto();
   }
   const fecharModal = () => { if (modal.open) modal.close(); };
@@ -69,12 +145,14 @@
     try { await aoEnviar(); } finally { if (btn) btn.disabled = false; }
   });
 
+  /** Confirmação com texto em um ou mais parágrafos. */
   function confirma(texto, rotulo = 'Confirmar', perigo = true) {
     return new Promise((ok) => {
       const d = document.createElement('dialog');
-      d.className = 'modal';
+      d.className = 'modal modal--confirma';
       d.setAttribute('aria-label', 'Confirmação');
-      d.innerHTML = `<div class="modal__box"><div class="modal__corpo"><p>${esc(texto)}</p></div>
+      const paragrafos = (Array.isArray(texto) ? texto : [texto]).filter(Boolean).map((p) => `<p>${esc(p)}</p>`).join('');
+      d.innerHTML = `<div class="modal__box"><div class="modal__corpo">${paragrafos}</div>
         <div class="modal__rodape"><button type="button" class="btn" data-r="0">Voltar</button><button type="button" class="btn ${perigo ? 'btn--perigo' : 'btn--solid'}" data-r="1">${esc(rotulo)}</button></div></div>`;
       document.body.appendChild(d);
       const fim = (v) => { d.close(); d.remove(); ok(v); };
@@ -108,12 +186,17 @@
     $('#painel').hidden = true; $('#login').hidden = false;
     const er = $('#l-erro'); er.hidden = !msg; er.textContent = msg || '';
     $('#l-senha').value = '';
+    clearInterval(S.timerAlertas); S.timerAlertas = null; S.ultimoAlerta = null;
+    document.title = TITULO_BASE;
     if (Api.logado()) Api.sair();
     setTimeout(() => $('#l-user').focus(), 30);
   }
   function mostrarPainel() {
     $('#login').hidden = true; $('#painel').hidden = false;
     rotear();
+    verificarAlertas();
+    clearInterval(S.timerAlertas);
+    S.timerAlertas = setInterval(verificarAlertas, 30000);
   }
   $('#form-login').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -125,16 +208,21 @@
       mostrarPainel();
     } catch (err) {
       er.hidden = false;
-      er.textContent = err.codigo === 'CREDENCIAIS' ? 'Usuário ou senha incorretos.' : err.codigo === 'MUITAS_TENTATIVAS' ? 'Muitas tentativas. Aguarde 1 minuto.' : (err.message || 'Não foi possível entrar.');
+      er.textContent = err.codigo === 'CREDENCIAIS' ? 'Usuário ou senha incorretos.' : err.codigo === 'MUITAS_TENTATIVAS' ? 'Muitas tentativas. Aguarde 1 minuto e tente de novo.' : textoErro(err);
     } finally { btn.disabled = false; btn.textContent = 'Entrar'; }
   });
   $('#sair').addEventListener('click', () => mostrarLogin());
 
-  async function recarregar() { D = await Api.carregarAdmin(); }
+  async function recarregar() {
+    const dados = await Api.carregarAdmin();
+    D = { config: {}, servicos: [], produtos: [], combos: [], horarios: [], galeria: [], bloqueios: [], ...dados };
+    D.produtos = Array.isArray(dados.produtos) ? dados.produtos : [];
+  }
 
   /* --------------------------------------------------------------- roteador */
   const VIEWS = {
-    dashboard: ['Dashboard', vDashboard], agendamentos: ['Agendamentos', vAgendamentos], servicos: ['Serviços', vServicos], combos: ['Combos', vCombos],
+    dashboard: ['Hoje', vDashboard], agendamentos: ['Agenda', vAgendamentos], caixa: ['Caixa', vCaixa], clientes: ['Clientes', vClientes], alertas: ['Alertas', vAlertas],
+    servicos: ['Serviços', vServicos], combos: ['Combos', vCombos], produtos: ['Produtos', vProdutos],
     horarios: ['Horários', vHorarios], bloqueios: ['Bloqueios', vBloqueios], galeria: ['Galeria', vGaleria], config: ['Configurações', vConfig],
   };
   async function rotear() {
@@ -146,7 +234,7 @@
     fecharMenu();
     const c = $('#conteudo');
     c.onclick = null; c.onchange = null; c.oninput = null; c.onsubmit = null;
-    c.innerHTML = '<p class="vazio">Carregando…</p>';
+    c.innerHTML = '<div class="carregando-pg" aria-busy="true"><span class="spinner" aria-hidden="true"></span>Carregando…</div>';
     await seguro(() => VIEWS[rotaAtual][1](c));
     BJIcons.hydrate(c);
     c.focus({ preventScroll: true });
@@ -160,61 +248,432 @@
   veu.addEventListener('click', fecharMenu);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') fecharMenu(); });
 
-  /* =================================================== Dashboard / Agenda */
-  function linhaAg(a) {
-    const nomes = a.servicos.map((s) => s.nome).join(' + ');
-    return `<button type="button" class="ag-row${a.status === 'cancelado' ? ' cancelado' : ''}" data-ag="${a.id}">
-      <span class="ag-hora">${A.fmtMin(a.inicio_min)}<small>até ${A.fmtMin(a.fim_min)}</small></span>
-      <span><span class="ag-nome">${esc(a.cliente.nome)}${a.status === 'cancelado' ? '<span class="tag off">Cancelado</span>' : ''}</span><span class="ag-serv" style="display:block">${esc(nomes)}</span></span>
-      <span class="ag-preco">${a.valor_consulta ? (Number(a.valor_total) ? A.fmtBRL(a.valor_total) + ' +' : 'A consultar') : A.fmtBRL(a.valor_total)}</span></button>`;
+  /* ================================================================ Alertas */
+  function atualizarBadges() {
+    const n = S.alertas.nao_lidos || 0;
+    $$('[data-badge-alertas]').forEach((b) => { b.textContent = n > 99 ? '99+' : String(n); b.hidden = !n; });
+    document.title = (n ? `(${n}) ` : '') + TITULO_BASE;
   }
+  function notificarSistema(novos) {
+    if (!('Notification' in window) || Notification.permission !== 'granted' || !document.hidden) return;
+    novos.slice(0, 3).forEach((a) => { try { new Notification(a.titulo, { body: a.mensagem, icon: 'assets/logo/logo-128.png', tag: 'bj-alerta-' + a.id }); } catch { /* sem suporte */ } });
+  }
+  /** Busca alertas a cada 30 s; avisa (toast + notificação do sistema) quando chega algo novo. */
+  async function verificarAlertas() {
+    if ($('#painel').hidden || !Api.logado()) return;
+    let r;
+    try { r = await Api.alertas(); } catch (e) { if (e.status === 401) mostrarLogin('Sua sessão expirou. Entre novamente.'); return; }
+    const primeira = S.ultimoAlerta == null;
+    const novos = primeira ? [] : r.alertas.filter((x) => x.id > S.ultimoAlerta && !x.lido_em);
+    S.alertas = r;
+    S.ultimoAlerta = r.alertas.reduce((m, x) => Math.max(m, Number(x.id)), S.ultimoAlerta || 0);
+    atualizarBadges();
+    if (!novos.length) return;
+    toast(novos.length === 1 ? novos[0].titulo : `${novos.length} novos alertas`);
+    notificarSistema(novos);
+    if (rotaAtual === 'alertas' || (rotaAtual === 'dashboard' && novos.some((n) => n.tipo === 'novo_agendamento'))) refazer();
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) verificarAlertas(); });
+
+  async function abrirAlerta(al) {
+    if (!al.lido_em) {
+      const r = await seguro(() => Api.marcarAlertasLidos([al.id]));
+      if (r) { S.alertas = r; atualizarBadges(); }
+    }
+    if (al.tipo === 'estoque_baixo') { location.hash = '#/produtos'; return; }
+    if (!al.data || !al.codigo) return refazer();
+    const lista = await seguro(() => Api.agendamentos(al.data, al.data));
+    const ag = lista && lista.find((x) => x.codigo === al.codigo);
+    if (rotaAtual === 'alertas') refazer();
+    if (ag) detalheAg(ag, refazer); else toast('Agendamento não encontrado.', false);
+  }
+
+  async function vAlertas(c) {
+    const r = await Api.alertas();
+    S.alertas = r; atualizarBadges();
+    const suporta = 'Notification' in window;
+    const permissao = suporta ? Notification.permission : 'denied';
+    const icone = (t) => (t === 'estoque_baixo' ? 'box' : 'calendar');
+    c.innerHTML = `<div class="pg-topo"><div><h1>Alertas</h1><p>Novos agendamentos feitos pelo site e avisos de estoque. O painel verifica a cada 30 segundos.</p></div>
+        <div class="pg-acoes">${r.nao_lidos ? '<button type="button" class="btn btn--sec" data-ler-todos>Marcar todos como lidos</button>' : ''}</div></div>
+      ${suporta && permissao === 'default' ? `<div class="aviso-barra">${BJIcons.svg('bell')}<span><b>Receba avisos mesmo com o painel em segundo plano.</b> Ative as notificações deste navegador.</span><button type="button" class="btn btn--sm btn--solid" data-permitir>Ativar</button></div>` : ''}
+      <div class="cartao">${r.alertas.length ? `<ul class="alertas">${r.alertas.map((al) => `
+        <li><button type="button" class="alerta-item${al.lido_em ? '' : ' nao-lido'}" data-alerta="${al.id}">
+          <span class="alerta-item__ic alerta-item__ic--${al.tipo}">${BJIcons.svg(icone(al.tipo))}</span>
+          <span class="alerta-item__txt"><b>${esc(al.titulo)}</b><span>${esc(al.mensagem)}</span></span>
+          <span class="alerta-item__hora">${esc(relativo(al.criado_em))}</span></button></li>`).join('')}</ul>`
+        : vazio('bell', 'Nenhum alerta por aqui', 'Quando um cliente agendar pelo site, o aviso aparece nesta tela e no menu.')}</div>`;
+    c.onclick = async (e) => {
+      if (e.target.closest('[data-permitir]')) { await Notification.requestPermission(); return refazer(); }
+      if (e.target.closest('[data-ler-todos]')) {
+        const x = await seguro(() => Api.marcarAlertasLidos());
+        if (x) { S.alertas = x; atualizarBadges(); toast('Alertas marcados como lidos.'); refazer(); }
+        return;
+      }
+      const b = e.target.closest('[data-alerta]');
+      if (b) abrirAlerta(S.alertas.alertas.find((x) => String(x.id) === b.dataset.alerta));
+    };
+  }
+
+  /* =================================================== Agendamento: linha e detalhe */
+  function linhaAg(a, extra = '') {
+    const nomes = a.servicos.map((s) => s.nome).join(' + ');
+    return `<button type="button" class="ag-row${a.status === 'cancelado' ? ' cancelado' : ''}${extra}" data-ag="${a.id}">
+      <span class="ag-hora">${A.fmtMin(a.inicio_min)}<small>até ${A.fmtMin(a.fim_min)}</small></span>
+      <span class="ag-info"><span class="ag-nome">${esc(BJ.nome(a.cliente.nome))}</span><span class="ag-serv">${esc(nomes)}</span></span>
+      <span class="ag-dir"><span class="ag-preco">${esc(valorAg(a))}</span>${pill(situacao(a))}</span></button>`;
+  }
+
   function detalheAg(a, aoMudar) {
     S.ag.set(String(a.id), a);
-    const itens = a.servicos.map((s) => `${esc(s.nome)} (${s.duracao_min} min)`).join('<br>');
+    const nome = BJ.nome(a.cliente.nome);
+    const confirmado = a.status === 'confirmado';
+    const total = Number(a.valor_total || 0), ajuste = Number(a.valor_ajuste || 0), vProdutos = Number(a.valor_produtos || 0);
+    const base = centavos(total - ajuste - vProdutos);
+    const pago = Number(a.total_pago || 0);
+    const saldo = Math.max(0, centavos(total - pago));
+    const pct = total > 0 ? Math.min(100, Math.round((pago / total) * 100)) : 0;
+    const temWa = digitos(a.cliente.whatsapp).length >= 10;
+    const hoje = hojeIso();
+    const futuro = a.data > hoje || (a.data === hoje && a.inicio_min > minAgora());
+    const lembreteOk = confirmado && temWa && futuro;
+    const aberturas = Number(a.lembrete_aberturas || 0) || Number(a.lembrete_envios || 0);
+    const ultimoLembrete = a.lembrete_aberto_em || a.lembrete_enviado_em;
+    const temProdutos = D.produtos.some((p) => p.ativo && p.estoque > 0);
+
+    const [ano, mes, dia] = a.data.split('-');
+    const textoLembrete = `Olá, ${nome}! Passando para lembrar que você tem um horário marcado na ${D.config.nome || 'Barbearia do Juan'} para ${a.servicos.map((s) => s.nome).join(' e ')}, ${A.DIAS[A.weekday(a.data)].toLowerCase()} ${dia}/${mes}/${ano.slice(-2)} às ${A.fmtMin(a.inicio_min).replace(':', 'h')}. Esperamos você!`;
+    const urlLembrete = `${waCliente(a.cliente.whatsapp)}?text=${encodeURIComponent(textoLembrete)}`;
+
+    const recibo = [
+      `<li><span>Serviços<small>${a.servicos.map((s) => esc(s.nome)).join(' + ')}${a.combos_aplicados ? ` · combo ${esc(a.combos_aplicados)}` : ''}</small></span><b>${esc(valorAg(a, base))}</b></li>`,
+      ...(a.produtos || []).map((p) => `<li><span>${esc(p.nome)}<small>${p.quantidade} × ${A.fmtBRL(p.preco_unitario)}</small></span><b>${A.fmtBRL(p.valor_total)}</b></li>`),
+      ajuste ? `<li class="${ajuste < 0 ? 'neg' : 'pos'}"><span>${ajuste < 0 ? 'Desconto' : 'Adicional'}</span><b>${ajuste < 0 ? '− ' : '+ '}${A.fmtBRL(Math.abs(ajuste))}</b></li>` : '',
+      `<li class="recibo__total"><span>Total</span><b>${esc(valorAg(a))}</b></li>`,
+    ].join('');
+    const pagamentos = (a.pagamentos || []).map((p) => `<li><span>${esc(FORMAS[p.forma] || p.forma)}<small>${esc(quando(p.recebido_em))}</small></span><b>${A.fmtBRL(p.valor)}</b></li>`).join('');
+    const statusLembrete = ultimoLembrete
+      ? `Conversa aberta ${esc(quando(ultimoLembrete))}${aberturas > 1 ? ` · ${aberturas} vezes` : ''}`
+      : (futuro ? 'Ainda não enviado.' : 'O horário já passou.');
+
     abrirModal({
       titulo: 'Agendamento ' + a.codigo,
-      corpo: `<dl class="det">
-        <div><dt>Status</dt><dd>${a.status === 'cancelado' ? '<span class="tag off">Cancelado</span>' : 'Confirmado'}</dd></div>
-        <div><dt>Cliente</dt><dd>${esc(a.cliente.nome)}</dd></div>
-        <div><dt>WhatsApp</dt><dd><a href="${esc(waCliente(a.cliente.whatsapp))}" target="_blank" rel="noopener" style="color:var(--gold-2)">${esc(fmtTel(a.cliente.whatsapp))}</a></dd></div>
-        <div><dt>Data</dt><dd>${esc(cap(dataLonga(a.data)))}</dd></div>
-        <div><dt>Horário</dt><dd>${A.fmtMin(a.inicio_min)} às ${A.fmtMin(a.fim_min)}</dd></div>
-        <div><dt>Serviços</dt><dd>${itens}${a.combos_aplicados ? `<br><small style="color:var(--gold-2)">Combo: ${esc(a.combos_aplicados)}</small>` : ''}</dd></div>
-        <div><dt>Duração</dt><dd>${A.fmtDur(a.duracao_min)}</dd></div>
-        <div><dt>Valor</dt><dd>${a.valor_consulta ? (Number(a.valor_total) ? A.fmtBRL(a.valor_total) + ' + a consultar' : 'A consultar') : A.fmtBRL(a.valor_total)}</dd></div>
-      </dl>`,
-      rodape: `<a class="btn" href="${esc(waCliente(a.cliente.whatsapp))}" target="_blank" rel="noopener"><i data-icon="whatsapp"></i>WhatsApp</a>
-        ${a.status === 'confirmado' ? '<button type="button" class="btn btn--perigo" id="cancelar-ag"><i data-icon="ban"></i>Cancelar agendamento</button>' : ''}
-        <button type="button" class="btn" data-fechar>Fechar</button>`,
+      corpo: `<div class="det-cab">
+          <span class="avatar">${esc(iniciais(nome))}</span>
+          <div class="det-cab__txt"><strong>${esc(nome)}</strong>
+            <span>${temWa ? `<a href="${esc(waCliente(a.cliente.whatsapp))}" target="_blank" rel="noopener">${BJIcons.svg('whatsapp')}${esc(fmtTel(a.cliente.whatsapp))}</a>` : 'Sem telefone cadastrado'}</span></div>
+          ${pill(situacao(a))}
+        </div>
+        <div class="det-fatos">
+          <div><span>Data</span><strong>${esc(dataCurta(a.data))}</strong></div>
+          <div><span>Horário</span><strong>${A.fmtMin(a.inicio_min)} – ${A.fmtMin(a.fim_min)}</strong></div>
+          <div><span>Duração</span><strong>${A.fmtDur(a.duracao_min)}</strong></div>
+        </div>
+        <section class="det-sec"><h3>Comanda</h3><ul class="recibo">${recibo}</ul></section>
+        <section class="det-sec"><div class="det-sec__topo"><h3>Pagamento</h3><span>${A.fmtBRL(pago)} de ${A.fmtBRL(total)}</span></div>
+          <div class="progresso${pct >= 100 ? ' completo' : ''}" role="progressbar" aria-label="Valor pago" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>
+          ${pagamentos ? `<ul class="recibo recibo--lista">${pagamentos}</ul>` : '<p class="det-vazio">Nenhum pagamento registrado.</p>'}
+          ${confirmado && saldo > 0 ? `<p class="det-falta">Falta receber <strong>${A.fmtBRL(saldo)}</strong></p>` : ''}
+        </section>
+        ${confirmado && temWa ? `<section class="det-sec det-lembrete"><div><h3>Lembrete por WhatsApp</h3><p id="lembrete-status">${statusLembrete}</p></div>
+          ${lembreteOk ? `<a class="btn btn--sm btn--sec" id="lembrete-link" href="${esc(urlLembrete)}" target="_blank" rel="noopener">${BJIcons.svg('whatsapp')}${aberturas ? 'Reenviar' : 'Enviar'}</a>` : ''}</section>` : ''}
+        <p class="det-meta">${a.criado_em ? `Criado em ${esc(quando(a.criado_em, true))} · ` : ''}Código ${esc(a.codigo)}</p>`,
+      rodape: `${confirmado ? '<button type="button" class="btn-texto perigo" id="cancelar-ag">Cancelar horário</button>' : ''}
+        <span class="modal__espaco"></span>
+        ${confirmado ? '<button type="button" class="btn btn--sec" id="ajuste-ag"><i data-icon="sliders"></i>Ajustar</button>' : ''}
+        ${confirmado && temProdutos ? '<button type="button" class="btn btn--sec" id="vender-produto-ag"><i data-icon="box"></i>Produto</button>' : ''}
+        ${confirmado && saldo > 0 ? '<button type="button" class="btn btn--solid" id="receber-ag"><i data-icon="wallet"></i>Receber</button>' : ''}
+        ${!confirmado ? '<button type="button" class="btn" data-fechar>Fechar</button>' : ''}`,
       aberto() {
-        const b = $('#cancelar-ag');
-        if (b) b.addEventListener('click', async () => {
-          if (!(await confirma(`Cancelar o agendamento de ${a.cliente.nome} (${A.fmtData(a.data)} às ${A.fmtMin(a.inicio_min)})? O horário volta a ficar disponível.`, 'Cancelar agendamento'))) return;
-          const ok = await seguro(() => Api.cancelar(a.id).then(() => true), 'Não foi possível cancelar.');
-          if (ok) { fecharModal(); toast('Agendamento cancelado.'); aoMudar(); }
+        const link = $('#lembrete-link');
+        if (link) link.addEventListener('click', () => {
+          Api.registrarAberturaLembrete(a.id).then((reg) => {
+            const st = $('#lembrete-status');
+            if (st) st.textContent = `Conversa aberta ${quando(reg.lembrete_aberto_em) || 'agora'} · ${reg.lembrete_aberturas} ${reg.lembrete_aberturas === 1 ? 'vez' : 'vezes'}`;
+            a.lembrete_aberto_em = reg.lembrete_aberto_em; a.lembrete_aberturas = reg.lembrete_aberturas;
+            toast('WhatsApp aberto. Toque em Enviar no aplicativo para concluir.');
+          }).catch((err) => toast('A conversa abriu, mas não consegui registrar o envio. ' + textoErro(err), false));
+        });
+        const on = (id, fn) => { const b = $('#' + id); if (b) b.addEventListener('click', fn); };
+        on('receber-ag', () => formRecebimento(a, saldo, aoMudar));
+        on('ajuste-ag', () => formAjuste(a, aoMudar));
+        on('vender-produto-ag', () => formVenda(a, aoMudar));
+        on('cancelar-ag', async () => {
+          const avisos = [`Cancelar o horário de ${nome} em ${A.fmtData(a.data)} às ${A.fmtMin(a.inicio_min)}? O horário volta a ficar livre na agenda.`];
+          if ((a.produtos || []).length) avisos.push('Os produtos desta comanda voltam para o estoque.');
+          if (pago > 0) avisos.push(`Já foram recebidos ${A.fmtBRL(pago)}. Esse valor continua registrado no caixa; se for devolver ao cliente, faça a devolução por fora.`);
+          if (!(await confirma(avisos, 'Cancelar agendamento'))) return;
+          const r = await seguro(() => Api.cancelar(a.id));
+          if (r) { fecharModal(); toast(r.produtos_devolvidos ? `Agendamento cancelado. ${plural(r.produtos_devolvidos, 'produto voltou', 'produtos voltaram')} ao estoque.` : 'Agendamento cancelado.'); await recarregar(); aoMudar(); }
         });
       },
     });
   }
 
+  const voltarDetalhe = () => "<button type=\"button\" class=\"btn\" data-voltar>Voltar</button>";
+  function ligarVoltar(a, aoMudar) { const b = $('[data-voltar]'); if (b) b.addEventListener('click', () => detalheAg(a, aoMudar)); }
+
+  function formRecebimento(a, saldo, aoMudar) {
+    abrirModal({
+      titulo: 'Registrar pagamento',
+      corpo: `<p class="sub">${esc(BJ.nome(a.cliente.nome))} · falta receber <strong>${A.fmtBRL(saldo)}</strong></p>
+        <div class="campo"><label for="receb-valor">Valor recebido</label><div class="campo-moeda"><span>R$</span><input id="receb-valor" inputmode="decimal" autocomplete="off" value="${fmtNum(saldo.toFixed(2))}" required></div>
+          <small>Pode ser parcial. O restante continua pendente.</small></div>
+        <fieldset class="campo"><legend class="rotulo">Forma de pagamento</legend><div class="opcoes">${Object.entries(FORMAS).map(([k, v]) => `<label class="opcao"><input type="radio" name="receb-forma" value="${k}" ${k === 'pix' ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div></fieldset>`,
+      rodape: `${voltarDetalhe()}<button type="submit" class="btn btn--solid">Confirmar pagamento</button>`,
+      aberto() { ligarVoltar(a, aoMudar); const i = $('#receb-valor'); i.focus(); i.select(); },
+      async enviar() {
+        const valor = centavos(numBR($('#receb-valor').value));
+        const forma = ($('input[name="receb-forma"]:checked') || {}).value;
+        if (!(valor > 0)) return toast('Informe um valor maior que zero.', false);
+        if (valor > saldo) return toast(`O valor passa do que falta receber (${A.fmtBRL(saldo)}).`, false);
+        if (!forma) return toast('Escolha a forma de pagamento.', false);
+        const ok = await seguro(() => Api.registrarRecebimento(a.id, valor, forma).then(() => true));
+        if (ok) { fecharModal(); toast(valor === saldo ? 'Pagamento registrado. Comanda quitada.' : `Pagamento de ${A.fmtBRL(valor)} registrado.`); aoMudar(); }
+      },
+    });
+  }
+
+  function formAjuste(a, aoMudar) {
+    const atual = Number(a.valor_ajuste || 0);
+    const semAjuste = centavos(Number(a.valor_total || 0) - atual);
+    const pago = Number(a.total_pago || 0);
+    const tipoAtual = atual > 0 ? 'adicional' : 'desconto';
+    abrirModal({
+      titulo: 'Ajustar valor',
+      corpo: `<p class="sub">Use para descontos ou cobranças extras. O valor sem ajuste é <strong>${A.fmtBRL(semAjuste)}</strong>.</p>
+        <fieldset class="campo"><legend class="rotulo">Tipo</legend><div class="opcoes opcoes--3">
+          <label class="opcao"><input type="radio" name="aj-tipo" value="desconto" ${tipoAtual === 'desconto' ? 'checked' : ''}><span>Desconto</span></label>
+          <label class="opcao"><input type="radio" name="aj-tipo" value="adicional" ${tipoAtual === 'adicional' ? 'checked' : ''}><span>Adicional</span></label>
+          <label class="opcao"><input type="radio" name="aj-tipo" value="remover"><span>Sem ajuste</span></label></div></fieldset>
+        <div class="campo"><label for="aj-valor">Valor</label><div class="campo-moeda"><span>R$</span><input id="aj-valor" inputmode="decimal" autocomplete="off" value="${atual ? fmtNum(Math.abs(atual).toFixed(2)) : ''}" placeholder="0,00"></div></div>
+        <div class="previa"><span>Novo total</span><strong id="aj-previa">${A.fmtBRL(a.valor_total)}</strong></div>
+        <p class="aviso-campo" id="aj-aviso" role="alert"></p>`,
+      rodape: `${voltarDetalhe()}<button type="submit" class="btn btn--solid" id="aj-salvar">Salvar ajuste</button>`,
+      aberto() {
+        ligarVoltar(a, aoMudar);
+        const calc = () => {
+          const tipo = $('input[name="aj-tipo"]:checked').value;
+          const v = tipo === 'remover' ? 0 : (numBR($('#aj-valor').value) || 0);
+          const ajuste = tipo === 'desconto' ? -v : tipo === 'adicional' ? v : 0;
+          const novo = centavos(semAjuste + ajuste);
+          $('#aj-valor').disabled = tipo === 'remover';
+          $('#aj-previa').textContent = A.fmtBRL(Math.max(0, novo));
+          const aviso = !Number.isFinite(v) || v < 0 ? 'Informe um valor válido.' : novo < 0 ? 'O desconto não pode ser maior que o valor da comanda.' : novo < pago ? `O cliente já pagou ${A.fmtBRL(pago)}; o total não pode ficar abaixo disso.` : '';
+          $('#aj-aviso').textContent = aviso;
+          $('#aj-salvar').disabled = !!aviso;
+          return { ajuste: centavos(ajuste), aviso };
+        };
+        $('#modal-corpo').oninput = calc; $('#modal-corpo').onchange = calc;
+        calc();
+        $('#aj-valor').focus();
+      },
+      async enviar() {
+        const tipo = $('input[name="aj-tipo"]:checked').value;
+        const v = tipo === 'remover' ? 0 : (numBR($('#aj-valor').value) || 0);
+        const ajuste = centavos(tipo === 'desconto' ? -v : tipo === 'adicional' ? v : 0);
+        const novo = centavos(semAjuste + ajuste);
+        if (!Number.isFinite(v) || v < 0 || novo < 0 || novo < pago) return toast($('#aj-aviso').textContent || 'Confira o valor.', false);
+        const ok = await seguro(() => Api.ajusteAgendamento(a.id, ajuste).then(() => true));
+        if (ok) { fecharModal(); toast(ajuste ? 'Ajuste salvo.' : 'Ajuste removido.'); aoMudar(); }
+      },
+    });
+  }
+
+  function formVenda(a, aoMudar) {
+    const disponiveis = D.produtos.filter((p) => p.ativo && p.estoque > 0);
+    if (!disponiveis.length) return toast('Não há produtos com estoque disponível.', false);
+    abrirModal({
+      titulo: 'Adicionar produto',
+      corpo: `<p class="sub">O valor entra na comanda de ${esc(BJ.nome(a.cliente.nome))} e a saída é registrada no estoque.</p>
+        <fieldset class="campo"><legend class="rotulo">Produto</legend><div class="lista-escolha">${disponiveis.map((p, i) => `
+          <label class="escolha"><input type="radio" name="vp-produto" value="${p.id}" ${i === 0 ? 'checked' : ''}>
+            <span class="escolha__txt"><b>${esc(p.nome)}</b><small>${plural(p.estoque, 'unidade', 'unidades')} em estoque</small></span><span class="escolha__preco">${A.fmtBRL(p.preco)}</span></label>`).join('')}</div></fieldset>
+        <div class="campo"><label for="vp-qtd">Quantidade</label><div class="contador"><button type="button" class="icone" data-qtd="-1" aria-label="Diminuir">−</button><input id="vp-qtd" type="number" min="1" step="1" value="1" inputmode="numeric"><button type="button" class="icone" data-qtd="1" aria-label="Aumentar">+</button></div></div>
+        <div class="previa"><span>Valor a adicionar</span><strong id="vp-previa"></strong></div>`,
+      rodape: `${voltarDetalhe()}<button type="submit" class="btn btn--solid">Adicionar à comanda</button>`,
+      aberto() {
+        ligarVoltar(a, aoMudar);
+        const produto = () => disponiveis.find((p) => p.id === Number(($('input[name="vp-produto"]:checked') || {}).value));
+        const calc = () => {
+          const p = produto(); const q = $('#vp-qtd');
+          q.max = p.estoque;
+          if (Number(q.value) > p.estoque) q.value = p.estoque;
+          $('#vp-previa').textContent = A.fmtBRL(centavos(p.preco * Math.max(1, Number(q.value) || 1)));
+        };
+        $('#modal-corpo').onclick = (e) => { const b = e.target.closest('[data-qtd]'); if (!b) return; const q = $('#vp-qtd'); q.value = Math.max(1, (Number(q.value) || 1) + Number(b.dataset.qtd)); calc(); };
+        $('#modal-corpo').onchange = calc; $('#modal-corpo').oninput = calc;
+        calc();
+      },
+      async enviar() {
+        const p = disponiveis.find((x) => x.id === Number(($('input[name="vp-produto"]:checked') || {}).value));
+        const quantidade = Number($('#vp-qtd').value);
+        if (!p || !Number.isInteger(quantidade) || quantidade < 1) return toast('Informe uma quantidade inteira maior que zero.', false);
+        if (quantidade > p.estoque) return toast(`Só há ${plural(p.estoque, 'unidade', 'unidades')} em estoque.`, false);
+        const ok = await seguro(() => Api.venderProduto(a.id, p.id, quantidade).then(() => true));
+        if (ok) { fecharModal(); await recarregar(); toast(`${p.nome} adicionado à comanda.`); aoMudar(); }
+      },
+    });
+  }
+
+  /* ------------------------------------------------- agendamento presencial */
+  async function abrirAgendamentoAdmin(dataInicial, aoCriar) {
+    const servicos = D.servicos.filter((s) => s.ativo);
+    const cacheDia = {}; // data -> agendamentos confirmados do dia
+    let inicioSel = null;
+    let clientes = [];
+    seguro(() => Api.clientes()).then((r) => {
+      clientes = (r && r.clientes) || [];
+      const dl = $('#admin-ag-clientes');
+      if (dl) dl.innerHTML = clientes.map((c) => `<option value="${esc(c.nome)}">${c.whatsapp ? esc(fmtTel(c.whatsapp)) : ''}</option>`).join('');
+    });
+    abrirModal({
+      titulo: 'Novo agendamento',
+      corpo: `<p class="sub">Para clientes que marcam pelo telefone ou chegam sem horário. Sobrenome e telefone são opcionais.</p>
+        <div class="grade2"><div class="campo"><label for="admin-ag-nome">Nome do cliente</label><input id="admin-ag-nome" maxlength="80" list="admin-ag-clientes" autocomplete="off" required><datalist id="admin-ag-clientes"></datalist></div>
+          <div class="campo"><label for="admin-ag-whats">WhatsApp <span class="opcional">opcional</span></label><input id="admin-ag-whats" type="tel" inputmode="tel" placeholder="(11) 9 9999-9999" maxlength="16"></div></div>
+        <fieldset class="campo"><legend class="rotulo">Serviços</legend><div class="chips">${servicos.map((s) => `<label class="chip"><input type="checkbox" name="admin-ag-servico" value="${s.id}"><span>${esc(s.nome)}<small>${esc(brl(s.preco))}</small></span></label>`).join('')}</div></fieldset>
+        <div class="campo"><label for="admin-ag-data">Data</label><input id="admin-ag-data" type="date" value="${esc(dataInicial || hojeIso())}" required></div>
+        <fieldset class="campo"><legend class="rotulo">Horário</legend><div id="admin-ag-slots" class="slots-adm-area"></div></fieldset>
+        <div class="previa" id="admin-ag-resumo"><span>Selecione ao menos um serviço</span><strong></strong></div>`,
+      rodape: '<button type="button" class="btn" data-fechar>Cancelar</button><button type="submit" class="btn btn--solid">Criar agendamento</button>',
+      aberto() {
+        const ids = () => $$('input[name="admin-ag-servico"]:checked').map((el) => Number(el.value));
+        const resumo = () => {
+          const p = A.calcPricing(ids(), D.servicos, D.combos);
+          const box = $('#admin-ag-resumo');
+          if (!ids().length) { box.innerHTML = '<span>Selecione ao menos um serviço</span><strong></strong>'; return; }
+          box.innerHTML = `<span>${A.fmtDur(p.duracao)}${inicioSel != null ? ` · ${A.fmtMin(inicioSel)} às ${A.fmtMin(inicioSel + p.duracao)}` : ' · escolha um horário'}${p.economia ? ' · combo aplicado' : ''}</span><strong>${esc(p.consulta ? (p.total ? A.fmtBRL(p.total) + ' + a consultar' : 'A consultar') : A.fmtBRL(p.total))}</strong>`;
+        };
+        /** Grade com todos os horários do dia: livres para escolher e ocupados com o motivo (cliente, almoço, bloqueio). */
+        const horarios = async () => {
+          const area = $('#admin-ag-slots'); const data = $('#admin-ag-data').value;
+          if (!data) { area.innerHTML = '<p class="slots-adm-msg">Escolha a data.</p>'; return resumo(); }
+          if (!A.janelaDoDia(data, D.horarios)) { inicioSel = null; area.innerHTML = '<p class="slots-adm-msg">A barbearia não abre neste dia.</p>'; return resumo(); }
+          if (!cacheDia[data]) {
+            area.innerHTML = '<p class="slots-adm-msg"><span class="spinner" aria-hidden="true"></span>Carregando horários…</p>';
+            const lista = await seguro(() => Api.agendamentos(data, data));
+            cacheDia[data] = (lista || []).filter((a) => a.status === 'confirmado');
+            if ($('#admin-ag-data').value !== data) return; // trocou a data no meio do caminho
+          }
+          const ags = cacheDia[data];
+          const temServico = ids().length > 0;
+          const passo = Math.max(5, Number(D.config.passo_min || 20));
+          const duracao = temServico ? A.calcPricing(ids(), D.servicos, D.combos).duracao : passo;
+          const slots = A.gerarHorarios({ data, duracao, horarios: D.horarios, config: D.config, bloqueios: D.bloqueios, ocupados: ags.map((a) => ({ ini: a.inicio_min, fim: a.fim_min })) })
+            .filter((s) => s.motivo !== 'FORA_DO_EXPEDIENTE');
+          const agoraMin = data === hojeIso() ? minAgora() : -1;
+          const livres = slots.filter((s) => s.livre);
+          if (inicioSel != null && !livres.some((s) => s.inicio_min === inicioSel)) inicioSel = null;
+          if (temServico && inicioSel == null && livres.length) inicioSel = (livres.find((s) => s.inicio_min >= agoraMin) || livres[0]).inicio_min;
+          // O que ocupa o início do slot: almoço, bloqueio ou cliente (com o intervalo real). Sem dono = o atendimento "não cabe".
+          const almoco = A.almoco(D.config);
+          const ocupante = (t) => {
+            if (almoco && almoco.ini <= t && t < almoco.fim) return { chave: 'almoco', rot: 'Almoço', ini: almoco.ini, fim: almoco.fim };
+            const b = D.bloqueios.find((x) => x.data === data && x.inicio_min <= t && t < x.fim_min);
+            if (b) return { chave: 'b' + b.id, rot: b.motivo || 'Bloqueado', ini: b.inicio_min, fim: b.fim_min };
+            const a = ags.find((x) => x.inicio_min <= t && t < x.fim_min);
+            if (a) return { chave: 'a' + a.id, rot: BJ.nome(a.cliente.nome).split(' ')[0], ini: a.inicio_min, fim: a.fim_min };
+            return null;
+          };
+          const janela = A.janelaDoDia(data, D.horarios);
+          let ultimaChave = null;
+          const itens = slots.map((s) => {
+            const passou = s.inicio_min < agoraMin;
+            const occ = s.livre ? null : ocupante(s.inicio_min);
+            if (occ) {
+              if (occ.chave === ultimaChave) return ''; // período já mostrado em um bloco só
+              ultimaChave = occ.chave;
+              const ini = Math.max(occ.ini, janela.ini), fim = Math.min(occ.fim, janela.fim);
+              return `<div class="slot-adm ocupado bloco" role="note" aria-label="${A.fmtMin(ini)} às ${A.fmtMin(fim)}, ${esc(occ.rot)}"><b>${A.fmtMin(ini)}–${A.fmtMin(fim)}</b><small>${esc(occ.rot)}</small></div>`;
+            }
+            ultimaChave = null;
+            // começa livre, mas o atendimento inteiro esbarra em algo antes de terminar
+            const rot = s.livre ? (passou ? 'já passou' : 'livre') : s.motivo === 'ALMOCO' ? 'invade almoço' : s.motivo === 'BLOQUEADO' ? 'invade bloqueio' : 'não cabe';
+            return `<button type="button" class="slot-adm${s.livre ? '' : ' ocupado'}${passou ? ' passou' : ''}${s.inicio_min === inicioSel ? ' sel' : ''}" data-slot="${s.inicio_min}" ${s.livre && temServico ? '' : 'disabled'} aria-pressed="${s.inicio_min === inicioSel}" aria-label="Começar às ${A.fmtMin(s.inicio_min)}, ${esc(rot)}">
+              <b>${A.fmtMin(s.inicio_min)}</b><small>${esc(rot)}</small></button>`;
+          }).join('');
+          area.innerHTML = `${temServico ? '' : '<p class="slots-adm-msg">Escolha os serviços para marcar. Abaixo, a ocupação do dia.</p>'}
+            <div class="slots-adm" role="group" aria-label="Horários do dia">${itens}</div>
+            <p class="slots-adm-legenda">Expediente das ${A.fmtMin(janela.ini)} às ${A.fmtMin(janela.fim)}. Os horários indicam o <b>início</b> do atendimento${temServico ? `, que precisa terminar antes do próximo compromisso` : ''}.</p>
+            ${temServico && !livres.length ? '<p class="slots-adm-msg">Nenhum horário livre comporta esses serviços neste dia.</p>' : ''}`;
+          resumo();
+        };
+        $('#modal-corpo').onchange = (e) => {
+          if (e.target.matches('input[name="admin-ag-servico"], #admin-ag-data')) horarios();
+          else if (e.target.id === 'admin-ag-nome') {
+            const c = clientes.find((x) => x.nome.toLowerCase() === e.target.value.trim().toLowerCase());
+            if (c && c.whatsapp && !$('#admin-ag-whats').value) $('#admin-ag-whats').value = fmtTel(c.whatsapp);
+          }
+        };
+        $('#modal-corpo').onclick = (e) => {
+          const b = e.target.closest('[data-slot]');
+          if (!b || b.disabled) return;
+          inicioSel = Number(b.dataset.slot);
+          $$('.slot-adm', $('#admin-ag-slots')).forEach((x) => { const on = Number(x.dataset.slot) === inicioSel; x.classList.toggle('sel', on); x.setAttribute('aria-pressed', on); });
+          resumo();
+        };
+        horarios();
+        $('#admin-ag-nome').focus();
+      },
+      async enviar() {
+        const nome = BJ.nome($('#admin-ag-nome').value);
+        const whatsapp = digitos($('#admin-ag-whats').value);
+        const data = $('#admin-ag-data').value;
+        const servico_ids = $$('input[name="admin-ag-servico"]:checked').map((el) => Number(el.value));
+        if (!nome) { $('#admin-ag-nome').focus(); return toast('Informe o nome do cliente.', false); }
+        if (whatsapp && (whatsapp.length < 10 || whatsapp.length > 13)) return toast('Confira o WhatsApp (com DDD) ou deixe o campo vazio.', false);
+        if (!servico_ids.length) return toast('Selecione pelo menos um serviço.', false);
+        if (!data || inicioSel == null) return toast('Escolha a data e um horário livre.', false);
+        const r = await seguro(() => Api.agendarAdmin({ data, inicio_min: inicioSel, servico_ids, nome, whatsapp }));
+        if (!r) return;
+        if (!r.ok) return toast(BJ.mensagemErro(r.erro), false);
+        fecharModal();
+        toast(`Agendamento de ${nome} criado para ${A.fmtData(data)} às ${A.fmtMin(inicioSel)}.`);
+        aoCriar(data);
+      },
+    });
+  }
+
+  /* ================================================================== Hoje */
   async function vDashboard(c) {
     const dia = S.dia || hojeIso();
     S.dia = dia;
-    const todos = await Api.agendamentos(dia, dia);
-    const ativos = todos.filter((a) => a.status === 'confirmado');
-    const previsto = ativos.reduce((s, a) => s + Number(a.valor_total), 0);
-    const mins = ativos.reduce((s, a) => s + a.duracao_min, 0);
     const ehHoje = dia === hojeIso();
-    c.innerHTML = `<div class="pg-topo"><div><h1>${ehHoje ? 'Hoje' : esc(cap(dataLonga(dia)))}</h1><p>${ativos.length} ${ativos.length === 1 ? 'agendamento' : 'agendamentos'}${ehHoje ? ' · ' + esc(cap(dataLonga(dia))) : ''}</p></div>
-      <div class="dia-nav"><button class="icone" data-d="-1" aria-label="Dia anterior"><i data-icon="left"></i></button>
-        <input type="date" id="dash-data" value="${dia}" aria-label="Escolher dia">
-        <button class="icone" data-d="1" aria-label="Próximo dia"><i data-icon="right"></i></button>
-        ${ehHoje ? '' : '<button class="btn btn--sm" data-d="0">Hoje</button>'}</div></div>
-      <div class="kpis"><div class="kpi"><span>Agendamentos</span><b>${ativos.length}</b></div><div class="kpi"><span>Faturamento previsto</span><b>${A.fmtBRL(previsto)}</b></div><div class="kpi"><span>Tempo ocupado</span><b>${mins ? A.fmtDur(mins) : '—'}</b></div></div>
-      <div class="cartao">${ativos.length ? `<div class="lista">${ativos.map(linhaAg).join('')}</div>` : '<p class="vazio">Nenhum agendamento neste dia.</p>'}</div>
-      <p style="margin-top:16px"><a class="btn btn--sm" href="#/agendamentos">Ver todos os agendamentos</a></p>`;
+    const [todos, caixa] = await Promise.all([Api.agendamentos(dia, dia), ehHoje ? Api.caixaDiario(dia).catch(() => null) : null]);
     todos.forEach((a) => S.ag.set(String(a.id), a));
+    const ativos = todos.filter((a) => a.status === 'confirmado');
+    const cancelados = todos.length - ativos.length;
+    const soma = (f) => centavos(ativos.reduce((s, a) => s + Number(f(a) || 0), 0));
+    const previsto = soma((a) => a.valor_total), recebido = soma((a) => a.total_pago), falta = soma((a) => a.saldo_devedor);
+    const mins = ativos.reduce((s, a) => s + a.duracao_min, 0);
+    const agoraMin = minAgora();
+    const atual = ehHoje ? ativos.find((a) => a.fim_min > agoraMin) : null;
+    const emAtendimento = atual && atual.inicio_min <= agoraMin;
+
+    c.innerHTML = `<div class="pg-topo"><div><h1>${ehHoje ? 'Hoje' : esc(dataCurta(dia))}</h1><p>${esc(cap(dataLonga(dia)))}</p></div>
+        <div class="pg-acoes"><div class="dia-nav"><button type="button" class="icone" data-d="-1" aria-label="Dia anterior"><i data-icon="left"></i></button>
+          <input type="date" id="dash-data" value="${dia}" aria-label="Escolher dia">
+          <button type="button" class="icone" data-d="1" aria-label="Próximo dia"><i data-icon="right"></i></button>
+          ${ehHoje ? '' : '<button type="button" class="btn btn--sm btn--sec" data-d="0">Hoje</button>'}</div>
+          <button type="button" class="btn btn--solid" data-admin-agendar><i data-icon="plus"></i>Novo agendamento</button></div></div>
+      ${caixa && caixa.status === 'nao_aberto' ? `<a class="aviso-barra" href="#/caixa">${BJIcons.svg('wallet')}<span><b>O caixa de hoje ainda não foi aberto.</b> Registre o troco inicial para conferir o fechamento no fim do dia.</span><span class="aviso-barra__acao">Abrir caixa</span></a>` : ''}
+      <div class="kpis">
+        ${kpi('Agendamentos', ativos.length, cancelados ? plural(cancelados, 'cancelado', 'cancelados') : (mins ? A.fmtDur(mins) + ' de agenda' : 'Agenda livre'))}
+        ${kpi('Previsto', A.fmtBRL(previsto))}
+        ${kpi('Recebido', A.fmtBRL(recebido), previsto ? Math.round((recebido / previsto) * 100) + '% do previsto' : '')}
+        ${kpi('A receber', A.fmtBRL(falta), '', falta > 0 ? 'kpi--alerta' : '')}
+      </div>
+      ${atual ? `<button type="button" class="destaque" data-ag="${atual.id}">
+          <span class="destaque__rotulo">${emAtendimento ? 'Em atendimento' : `Próximo · em ${A.fmtDur(atual.inicio_min - agoraMin)}`}</span>
+          <span class="destaque__hora">${A.fmtMin(atual.inicio_min)}</span>
+          <span class="destaque__info"><b>${esc(BJ.nome(atual.cliente.nome))}</b><span>${esc(atual.servicos.map((s) => s.nome).join(' + '))}</span></span>
+          <span class="destaque__seta">${BJIcons.svg('right')}</span></button>` : ''}
+      <div class="cartao"><div class="cartao__cab"><h2>Agenda do dia</h2><a class="link" href="#/agendamentos">Ver agenda completa</a></div>
+        ${ativos.length ? `<div class="lista">${ativos.map((a) => linhaAg(a, atual && a.id === atual.id ? ' atual' : (ehHoje && a.fim_min <= agoraMin ? ' passado' : ''))).join('')}</div>`
+          : vazio('calendar', 'Nenhum agendamento neste dia', ehHoje ? 'Os horários marcados pelo site aparecem aqui automaticamente.' : '', '<button type="button" class="btn btn--sm btn--sec" data-admin-agendar>Agendar cliente</button>')}</div>`;
     c.onclick = (e) => {
+      if (e.target.closest('[data-admin-agendar]')) return abrirAgendamentoAdmin(S.dia, (d) => { S.dia = d; refazer(); });
       const r = e.target.closest('[data-ag]');
       if (r) return detalheAg(S.ag.get(r.dataset.ag), refazer);
       const d = e.target.closest('[data-d]');
@@ -223,40 +682,215 @@
     c.onchange = (e) => { if (e.target.id === 'dash-data' && e.target.value) { S.dia = e.target.value; refazer(); } };
   }
 
+  /* ================================================================== Agenda */
   async function vAgendamentos(c) {
     if (!S.mes) { const [y, m] = hojeIso().split('-').map(Number); S.mes = { y, m: m - 1 }; }
     const { y, m } = S.mes;
     const ultimo = new Date(y, m + 1, 0).getDate();
     const p2 = (n) => String(n).padStart(2, '0');
-    const lista = await Api.agendamentos(`${y}-${p2(m + 1)}-01`, `${y}-${p2(m + 1)}-${p2(ultimo)}`);
+    const prefixo = `${y}-${p2(m + 1)}`;
+    const lista = await Api.agendamentos(`${prefixo}-01`, `${prefixo}-${p2(ultimo)}`);
     lista.forEach((a) => S.ag.set(String(a.id), a));
     const ativos = lista.filter((a) => a.status === 'confirmado');
     const porDia = {};
     ativos.forEach((a) => { porDia[a.data] = (porDia[a.data] || 0) + 1; });
-    if (!S.diaAg || S.diaAg.slice(0, 7) !== `${y}-${p2(m + 1)}`) S.diaAg = hojeIso().slice(0, 7) === `${y}-${p2(m + 1)}` ? hojeIso() : `${y}-${p2(m + 1)}-01`;
+    if (!S.diaAg || S.diaAg.slice(0, 7) !== prefixo) S.diaAg = hojeIso().slice(0, 7) === prefixo ? hojeIso() : `${prefixo}-01`;
     const primeiro = new Date(y, m, 1).getDay();
     let cel = ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'].map((l) => `<span class="sem" aria-hidden="true">${l}</span>`).join('') + '<span class="vazio-c"></span>'.repeat(primeiro);
     for (let d = 1; d <= ultimo; d++) {
-      const iso = `${y}-${p2(m + 1)}-${p2(d)}`;
-      cel += `<button type="button" data-dia="${iso}" class="${iso === S.diaAg ? 'sel' : ''}${iso === hojeIso() ? ' hoje' : ''}" aria-label="${esc(dataLonga(iso))}${porDia[iso] ? ', ' + porDia[iso] + ' agendamentos' : ''}" ${iso === S.diaAg ? 'aria-pressed="true"' : ''}>${d}${porDia[iso] ? `<i>${'●'.repeat(Math.min(porDia[iso], 3))}${porDia[iso] > 3 ? '+' : ''}</i>` : ''}</button>`;
+      const iso = `${prefixo}-${p2(d)}`;
+      const n = porDia[iso] || 0;
+      const fechado = !A.janelaDoDia(iso, D.horarios);
+      cel += `<button type="button" data-dia="${iso}" class="${iso === S.diaAg ? 'sel' : ''}${iso === hojeIso() ? ' hoje' : ''}${fechado ? ' fechado' : ''}" aria-label="${esc(dataLonga(iso))}${n ? ', ' + plural(n, 'agendamento', 'agendamentos') : ''}" ${iso === S.diaAg ? 'aria-pressed="true"' : ''}>${d}${n ? `<i>${n}</i>` : ''}</button>`;
     }
     const doDia = lista.filter((a) => a.data === S.diaAg && (S.mostrarCancelados || a.status === 'confirmado'));
-    c.innerHTML = `<div class="pg-topo"><div><h1>Agendamentos</h1><p>Toque em um dia para ver os horários marcados.</p></div></div>
+    const canceladosDia = lista.filter((a) => a.data === S.diaAg && a.status === 'cancelado').length;
+    const totalDia = centavos(doDia.filter((a) => a.status === 'confirmado').reduce((s, a) => s + Number(a.valor_total), 0));
+    c.innerHTML = `<div class="pg-topo"><div><h1>Agenda</h1><p>Escolha um dia no calendário para ver os horários marcados.</p></div>
+        <div class="pg-acoes"><button type="button" class="btn btn--solid" data-admin-agendar><i data-icon="plus"></i>Novo agendamento</button></div></div>
       <div class="duas-col"><div class="cartao cartao__pad">
-        <div class="cal-topo"><button class="icone" data-mes="-1" aria-label="Mês anterior"><i data-icon="left"></i></button><strong>${A.MESES[m]} ${y}</strong><button class="icone" data-mes="1" aria-label="Próximo mês"><i data-icon="right"></i></button></div>
-        <div class="cal-adm" role="group" aria-label="Calendário">${cel}</div>
-        <p style="margin-top:12px;font-size:12px;color:var(--muted)">● = agendamentos no dia · ${ativos.length} no mês</p></div>
-      <div class="cartao"><div class="cartao__pad" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;border-bottom:1px solid var(--line)">
-        <div><h2 style="margin:0">${esc(cap(dataLonga(S.diaAg)))}</h2></div>
-        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)"><span class="chave"><input type="checkbox" id="ver-canc" ${S.mostrarCancelados ? 'checked' : ''}><span></span></span>Mostrar cancelados</label></div>
-        ${doDia.length ? `<div class="lista">${doDia.map(linhaAg).join('')}</div>` : '<p class="vazio">Nenhum agendamento neste dia.</p>'}</div></div>`;
+          <div class="cal-topo"><button type="button" class="icone" data-mes="-1" aria-label="Mês anterior"><i data-icon="left"></i></button><strong>${A.MESES[m]} ${y}</strong><button type="button" class="icone" data-mes="1" aria-label="Próximo mês"><i data-icon="right"></i></button></div>
+          <div class="cal-adm" role="group" aria-label="Calendário">${cel}</div>
+          <p class="cal-legenda">${plural(ativos.length, 'agendamento', 'agendamentos')} no mês</p></div>
+        <div class="cartao"><div class="cartao__cab"><div><h2>${esc(cap(dataLonga(S.diaAg)))}</h2><p>${plural(doDia.filter((a) => a.status === 'confirmado').length, 'agendamento', 'agendamentos')}${totalDia ? ' · ' + A.fmtBRL(totalDia) : ''}</p></div>
+            ${canceladosDia || S.mostrarCancelados ? `<label class="alternar"><span class="chave"><input type="checkbox" id="ver-canc" ${S.mostrarCancelados ? 'checked' : ''}><span></span></span>Cancelados (${canceladosDia})</label>` : ''}</div>
+          ${doDia.length ? `<div class="lista agenda-dia-lista">${doDia.map((a) => linhaAg(a)).join('')}</div>`
+            : vazio('calendar', A.janelaDoDia(S.diaAg, D.horarios) ? 'Nenhum agendamento neste dia' : 'A barbearia não abre neste dia', '', A.janelaDoDia(S.diaAg, D.horarios) ? '<button type="button" class="btn btn--sm btn--sec" data-admin-agendar>Agendar cliente</button>' : '')}</div></div>`;
     c.onclick = (e) => {
+      if (e.target.closest('[data-admin-agendar]')) return abrirAgendamentoAdmin(S.diaAg, (dia) => { S.diaAg = dia; S.mes = { y: Number(dia.slice(0, 4)), m: Number(dia.slice(5, 7)) - 1 }; refazer(); });
       const r = e.target.closest('[data-ag]'); if (r) return detalheAg(S.ag.get(r.dataset.ag), refazer);
       const d = e.target.closest('[data-dia]'); if (d) { S.diaAg = d.dataset.dia; return refazer(); }
       const mm = e.target.closest('[data-mes]');
       if (mm) { const t = new Date(S.mes.y, S.mes.m + Number(mm.dataset.mes), 1); S.mes = { y: t.getFullYear(), m: t.getMonth() }; refazer(); }
     };
     c.onchange = (e) => { if (e.target.id === 'ver-canc') { S.mostrarCancelados = e.target.checked; refazer(); } };
+  }
+
+  /* ==================================================================== Caixa */
+  const PERIODOS = { hoje: 'Hoje', semana: 'Semana', mes: 'Mês', ano: 'Ano', total: 'Tudo' };
+  function cartaoCaixaDia(cx, dia) {
+    if (cx.status === 'nao_aberto') {
+      return `<div class="cartao cartao__pad caixa-dia"><div class="caixa-dia__cab"><div><h2>Caixa do dia</h2><p>${esc(dataCurta(dia))} · informe quanto dinheiro tem na gaveta para começar.</p></div>${pill(['Não aberto', 'muted'])}</div>
+        <form id="form-abrir-caixa" class="caixa-form">
+          <div class="campo"><label for="caixa-abertura">Troco inicial</label><div class="campo-moeda"><span>R$</span><input id="caixa-abertura" inputmode="decimal" autocomplete="off" placeholder="0,00" required></div></div>
+          <div class="campo"><label for="caixa-observacao">Observação <span class="opcional">opcional</span></label><input id="caixa-observacao" maxlength="240" placeholder="Ex.: troco do dia anterior"></div>
+          <button class="btn btn--solid" type="submit">Abrir caixa</button>
+        </form>
+        ${cx.recebido_dinheiro ? `<p class="nota">${BJIcons.svg('info')}Já há ${A.fmtBRL(cx.recebido_dinheiro)} recebidos em dinheiro hoje.</p>` : ''}</div>`;
+    }
+    const aberto = cx.status === 'aberto';
+    const dif = Number(cx.diferenca || 0);
+    return `<div class="cartao cartao__pad caixa-dia"><div class="caixa-dia__cab"><div><h2>Caixa do dia</h2><p>${esc(dataCurta(dia))}${cx.aberto_em ? ` · aberto às ${esc((quando(cx.aberto_em).split(' às ')[1]) || '')}` : ''}${cx.fechado_em ? ` · fechado às ${esc((quando(cx.fechado_em).split(' às ')[1]) || '')}` : ''}</p></div>
+        ${pill(aberto ? ['Aberto', 'ok'] : ['Fechado', 'muted'])}</div>
+      <div class="conta">
+        <div><span>Troco inicial</span><b>${A.fmtBRL(cx.valor_abertura)}</b></div>
+        <div class="conta__op">+</div>
+        <div><span>Entradas em dinheiro</span><b>${A.fmtBRL(cx.recebido_dinheiro)}</b></div>
+        <div class="conta__op">=</div>
+        <div class="conta__res"><span>Esperado na gaveta</span><b>${A.fmtBRL(cx.valor_esperado)}</b></div>
+      </div>
+      ${aberto ? `<form id="form-fechar-caixa" class="caixa-form caixa-form--fechar">
+          <div class="campo"><label for="caixa-contado">Dinheiro contado na gaveta</label><div class="campo-moeda"><span>R$</span><input id="caixa-contado" inputmode="decimal" autocomplete="off" placeholder="${fmtNum(Number(cx.valor_esperado || 0).toFixed(2))}" required></div>
+            <small>Conte as notas e moedas antes de fechar.</small></div>
+          <button class="btn btn--solid" type="submit">Fechar caixa</button></form>`
+        : `<div class="fechamento ${dif < 0 ? 'falta' : dif > 0 ? 'sobra' : 'certo'}"><span>Contado: <b>${A.fmtBRL(cx.valor_contado)}</b></span>
+            <strong>${dif === 0 ? 'Caixa bateu certinho' : dif < 0 ? `Faltaram ${A.fmtBRL(Math.abs(dif))}` : `Sobraram ${A.fmtBRL(dif)}`}</strong></div>`}
+      ${cx.observacao ? `<p class="nota">${BJIcons.svg('info')}${esc(cx.observacao)}</p>` : ''}</div>`;
+  }
+
+  async function vCaixa(c) {
+    const dia = hojeIso();
+    const [resumo, caixaDia] = await Promise.all([Api.caixa(), Api.caixaDiario(dia)]);
+    const render = () => {
+      const p = resumo[S.periodo] || resumo.hoje;
+      const faixa = S.periodo === 'total' ? 'Todo o histórico' : p.de === p.ate ? A.fmtData(p.de) : `${A.fmtData(p.de)} a ${A.fmtData(p.ate)}`;
+      const formas = Object.entries(p.por_forma || {});
+      const maxForma = Math.max(0, ...formas.map(([, v]) => Number(v)));
+      const top = p.servicos_mais_vendidos || [];
+      const maxTop = Math.max(0, ...top.map((s) => s.quantidade));
+      const pctProd = p.total > 0 ? Math.round((p.produtos / (p.servicos + p.produtos || 1)) * 100) : 0;
+      $('#caixa-periodo').innerHTML = `
+        <div class="periodo-cab"><div class="seg" role="tablist" aria-label="Período">${Object.entries(PERIODOS).map(([k, v]) => `<button type="button" role="tab" aria-selected="${k === S.periodo}" data-periodo="${k}">${v}</button>`).join('')}</div>
+          <span class="periodo-faixa">${esc(faixa)}</span></div>
+        <div class="kpis">
+          ${kpi('Faturamento', A.fmtBRL(p.total), plural(p.agendamentos, 'atendimento', 'atendimentos'), 'kpi--destaque')}
+          ${kpi('Recebido', A.fmtBRL(p.recebido), 'Entradas no período')}
+          ${kpi('A receber', A.fmtBRL(p.a_receber), 'Dos atendimentos do período', p.a_receber > 0 ? 'kpi--alerta' : '')}
+          ${kpi('Ticket médio', A.fmtBRL(p.ticket_medio), 'Por atendimento')}
+        </div>
+        <div class="grade-cartoes">
+          <div class="cartao cartao__pad"><h2>De onde veio o faturamento</h2>
+            ${p.total || p.descontos ? `<div class="divisao" aria-hidden="true"><span style="width:${100 - pctProd}%"></span><span style="width:${pctProd}%"></span></div>
+            <ul class="recibo">
+              <li><span><i class="ponto ponto--1"></i>Serviços e combos</span><b>${A.fmtBRL(p.servicos)}</b></li>
+              <li><span><i class="ponto ponto--2"></i>Produtos</span><b>${A.fmtBRL(p.produtos)}</b></li>
+              ${p.adicionais ? `<li class="pos"><span>Adicionais</span><b>+ ${A.fmtBRL(p.adicionais)}</b></li>` : ''}
+              ${p.descontos ? `<li class="neg"><span>Descontos</span><b>− ${A.fmtBRL(p.descontos)}</b></li>` : ''}
+              <li class="recibo__total"><span>Total</span><b>${A.fmtBRL(p.total)}</b></li></ul>` : vazio('receipt', 'Sem atendimentos neste período')}</div>
+          <div class="cartao cartao__pad"><h2>Como recebeu</h2>
+            ${p.recebido ? `<div class="barras">${formas.map(([k, v]) => barra(FORMAS[k], Number(v), maxForma, `${A.fmtBRL(v)}<small>${p.recebido ? Math.round((v / p.recebido) * 100) : 0}%</small>`)).join('')}</div>`
+              : vazio('wallet', 'Nenhum pagamento registrado', 'Registre os pagamentos no detalhe de cada agendamento.')}</div>
+        </div>
+        <div class="cartao cartao__pad"><h2>Serviços mais vendidos</h2>
+          ${top.length ? `<div class="barras barras--ranking">${top.map((s, i) => barra(`<i class="pos-rank">${i + 1}</i>${esc(s.nome)}`, s.quantidade, maxTop, `${s.quantidade}×<small>${A.fmtBRL(s.valor)}</small>`, i === 0 ? 'barra--top' : '')).join('')}</div>`
+            : vazio('scissors', 'Nenhum serviço vendido neste período')}</div>`;
+    };
+    c.innerHTML = `<div class="pg-topo"><div><h1>Caixa</h1><p>Abertura e fechamento do dia, faturamento e formas de pagamento.</p></div></div>
+      ${cartaoCaixaDia(caixaDia, dia)}<div id="caixa-periodo"></div>`;
+    render();
+    c.onclick = (e) => {
+      const b = e.target.closest('[data-periodo]');
+      if (b) { S.periodo = b.dataset.periodo; render(); BJIcons.hydrate(c); $(`[data-periodo="${S.periodo}"]`).focus(); }
+    };
+    c.onsubmit = async (e) => {
+      const form = e.target.closest('#form-abrir-caixa, #form-fechar-caixa');
+      if (!form) return;
+      e.preventDefault();
+      if (form.id === 'form-abrir-caixa') {
+        const valor = centavos(numBR($('#caixa-abertura').value) ?? 0);
+        if (!(valor >= 0)) return toast('Informe o troco inicial (pode ser 0).', false);
+        const ok = await seguro(() => Api.abrirCaixa(dia, valor, $('#caixa-observacao').value.trim()));
+        if (ok) { toast('Caixa aberto.'); refazer(); }
+      } else {
+        const txt = $('#caixa-contado').value;
+        if (txt.trim() === '') { $('#caixa-contado').focus(); return toast('Informe quanto dinheiro foi contado na gaveta.', false); }
+        const valor = centavos(numBR(txt));
+        if (!(valor >= 0)) return toast('Informe um valor válido.', false);
+        const dif = centavos(valor - Number(caixaDia.valor_esperado || 0));
+        if (dif !== 0 && !(await confirma([`O valor contado (${A.fmtBRL(valor)}) é diferente do esperado (${A.fmtBRL(caixaDia.valor_esperado)}).`, dif < 0 ? `Faltam ${A.fmtBRL(-dif)}. Deseja fechar mesmo assim?` : `Sobram ${A.fmtBRL(dif)}. Deseja fechar mesmo assim?`], 'Fechar caixa', false))) return;
+        const r = await seguro(() => Api.fecharCaixa(dia, valor));
+        if (r) { toast(Number(r.diferenca) === 0 ? 'Caixa fechado. Bateu certinho!' : 'Caixa fechado com diferença registrada.'); refazer(); }
+      }
+    };
+  }
+
+  /* ================================================================= Clientes */
+  async function vClientes(c) {
+    const r = await Api.clientes();
+    const clientes = r.clientes || [];
+    const semana = r.semana || [];
+    const abertos = new Set((r.abertos || []).map(Number));
+    const comVisita = clientes.filter((x) => x.visitas > 0);
+    const fiel = comVisita.slice().sort((a, b) => b.visitas - a.visitas || b.total_gasto - a.total_gasto)[0];
+    const maiorValor = comVisita.slice().sort((a, b) => b.total_gasto - a.total_gasto)[0];
+    const recorrentes = clientes.filter((x) => x.visitas >= 2).length;
+    const ordemSemana = [1, 2, 3, 4, 5, 6, 0].map((d) => semana.find((s) => s.dia === d) || { dia: d, agendamentos: 0 });
+    const maxSemana = Math.max(0, ...ordemSemana.map((s) => s.agendamentos));
+    const abertosMov = ordemSemana.filter((s) => abertos.has(s.dia));
+    const maxAberto = Math.max(0, ...abertosMov.map((s) => s.agendamentos));
+    const minAberto = Math.min(...abertosMov.map((s) => s.agendamentos));
+    const temDiferenca = maxAberto > 0 && minAberto < maxAberto;
+    const nomesDias = (v) => {
+      const l = abertosMov.filter((s) => s.agendamentos === v).map((s) => A.DIAS[s.dia]);
+      return l.length > 1 ? l.slice(0, -1).join(', ') + ' e ' + l[l.length - 1] : l[0];
+    };
+
+    c.innerHTML = `<div class="pg-topo"><div><h1>Clientes</h1><p>Quem mais frequenta, quanto cada cliente já movimentou e os dias de maior procura.</p></div></div>
+      <div class="kpis">
+        ${kpi('Clientes', clientes.length, comVisita.length ? `${comVisita.length} já atendidos` : '')}
+        ${kpi('Voltaram 2+ vezes', recorrentes, comVisita.length ? Math.round((recorrentes / comVisita.length) * 100) + '% dos atendidos' : '')}
+        ${kpi('Mais fiel', fiel ? esc(fiel.nome.split(' ')[0]) : '—', fiel ? plural(fiel.visitas, 'visita', 'visitas') : '', 'kpi--texto')}
+        ${kpi('Maior valor', maiorValor ? esc(maiorValor.nome.split(' ')[0]) : '—', maiorValor ? A.fmtBRL(maiorValor.total_gasto) : '', 'kpi--texto')}
+      </div>
+      <div class="cartao cartao__pad"><div class="cartao__cab cartao__cab--sem-borda"><h2>Movimento por dia da semana</h2>
+          ${temDiferenca ? `<p>Mais cheio: <b>${nomesDias(maxAberto)}</b> · Mais vazio: <b>${nomesDias(minAberto)}</b></p>` : ''}</div>
+        ${maxSemana ? `<div class="colunas" role="img" aria-label="Atendimentos por dia da semana: ${ordemSemana.map((s) => `${A.DIAS[s.dia]} ${s.agendamentos}`).join(', ')}">${ordemSemana.map((s) => {
+          const cls = !abertos.has(s.dia) ? ' fechado' : temDiferenca && s.agendamentos === maxAberto ? ' top' : temDiferenca && s.agendamentos === minAberto ? ' baixo' : '';
+          return `<div class="coluna${cls}"><b>${abertos.has(s.dia) || s.agendamentos ? s.agendamentos : ''}</b><span class="coluna__barra" style="height:${s.agendamentos ? Math.max(4, Math.round((s.agendamentos / maxSemana) * 100)) : 0}%"></span><small>${A.DIAS_CURTOS[s.dia]}</small></div>`;
+        }).join('')}</div>` : vazio('chart', 'Ainda não há atendimentos realizados', 'O gráfico aparece depois dos primeiros atendimentos.')}</div>
+      <div class="cartao"><div class="cartao__cab"><h2>Todos os clientes</h2>
+          <div class="ferramentas"><label class="busca">${BJIcons.svg('search')}<input type="search" id="cli-busca" placeholder="Buscar por nome ou telefone" value="${esc(S.buscaCli)}" aria-label="Buscar cliente"></label>
+            <select id="cli-ordem" aria-label="Ordenar por">${[['visitas', 'Mais visitas'], ['gasto', 'Maior valor'], ['recente', 'Visita mais recente'], ['nome', 'Nome (A–Z)']].map(([k, v]) => `<option value="${k}" ${S.ordemCli === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div></div>
+        <div id="cli-lista"></div></div>`;
+
+    const lista = () => {
+      const q = S.buscaCli.trim().toLowerCase();
+      const qd = digitos(q);
+      const ordem = {
+        visitas: (a, b) => b.visitas - a.visitas || b.total_gasto - a.total_gasto,
+        gasto: (a, b) => b.total_gasto - a.total_gasto,
+        recente: (a, b) => String(b.ultima_visita || '').localeCompare(String(a.ultima_visita || '')),
+        nome: (a, b) => a.nome.localeCompare(b.nome, 'pt-BR'),
+      }[S.ordemCli];
+      const filtrados = clientes.filter((x) => !q || x.nome.toLowerCase().includes(q) || (qd && digitos(x.whatsapp).includes(qd))).sort(ordem);
+      const vis = filtrados.slice(0, S.limiteCli);
+      $('#cli-lista').innerHTML = filtrados.length ? `<div class="tabela" role="table" aria-label="Clientes">
+          <div class="tabela__cab" role="row"><span role="columnheader">Cliente</span><span role="columnheader">Visitas</span><span role="columnheader">Total</span><span role="columnheader">Última visita</span><span role="columnheader">Próxima</span><span role="columnheader"><span class="sr-only">WhatsApp</span></span></div>
+          ${vis.map((x) => `<div class="tabela__linha" role="row">
+            <span class="cli" role="cell"><span class="avatar avatar--sm">${esc(iniciais(x.nome))}</span><span><b>${esc(x.nome)}</b><small>${x.whatsapp ? esc(fmtTel(x.whatsapp)) : 'Sem telefone'}</small></span></span>
+            <span role="cell" data-rot="Visitas">${x.visitas}${x.visitas >= 5 ? ' <span class="pill pill--ok">Fiel</span>' : ''}</span>
+            <span role="cell" data-rot="Total">${A.fmtBRL(x.total_gasto)}</span>
+            <span role="cell" data-rot="Última visita">${x.ultima_visita ? A.fmtData(x.ultima_visita) : '—'}</span>
+            <span role="cell" data-rot="Próxima">${x.proxima_visita ? A.fmtData(x.proxima_visita) : '—'}</span>
+            <span role="cell" class="tabela__acao">${digitos(x.whatsapp).length >= 10 ? `<a class="icone" href="${esc(waCliente(x.whatsapp))}" target="_blank" rel="noopener" aria-label="WhatsApp de ${esc(x.nome)}">${BJIcons.svg('whatsapp')}</a>` : ''}</span>
+          </div>`).join('')}</div>
+          ${filtrados.length > vis.length ? `<div class="mais"><button type="button" class="btn btn--sm btn--sec" data-mais>Mostrar mais (${filtrados.length - vis.length})</button></div>` : ''}`
+        : vazio('users', q ? 'Nenhum cliente encontrado' : 'Nenhum cliente ainda', q ? 'Tente outro nome ou telefone.' : 'Os clientes são cadastrados automaticamente ao agendar.');
+    };
+    lista();
+    c.oninput = (e) => { if (e.target.id === 'cli-busca') { S.buscaCli = e.target.value; S.limiteCli = 30; lista(); } };
+    c.onchange = (e) => { if (e.target.id === 'cli-ordem') { S.ordemCli = e.target.value; lista(); } };
+    c.onclick = (e) => { if (e.target.closest('[data-mais]')) { S.limiteCli += 30; lista(); } };
   }
 
   /* ============================================================ Serviços */
@@ -294,7 +928,7 @@
       titulo: s ? 'Editar serviço' : 'Novo serviço',
       corpo: `<div class="campo"><label for="f-nome">Nome</label><input id="f-nome" value="${esc(s ? s.nome : '')}" maxlength="60" required></div>
         <div class="grade2"><div class="campo"><label for="f-dur">Duração (minutos)</label><input id="f-dur" type="number" min="5" max="600" step="5" value="${s ? s.duracao_min : 30}" required></div>
-        <div class="campo"><label for="f-preco">Preço (R$)</label><input id="f-preco" inputmode="decimal" placeholder="vazio = sob consulta" value="${esc(s ? fmtNum(s.preco) : '')}"></div></div>
+        <div class="campo"><label for="f-preco">Preço</label><div class="campo-moeda"><span>R$</span><input id="f-preco" inputmode="decimal" placeholder="Sob consulta" value="${esc(s ? fmtNum(s.preco) : '')}"></div><small>Deixe vazio para “sob consulta”.</small></div></div>
         <div class="campo"><label for="f-desc">Descrição (opcional)</label><textarea id="f-desc" maxlength="300">${esc(s ? s.descricao : '')}</textarea></div>
         ${uploadHtml('f-foto', foto, { rotulo: 'Foto' })}
         <div class="grade2"><div class="campo"><label for="f-ordem">Ordem de exibição</label><input id="f-ordem" type="number" value="${s ? s.ordem : (D.servicos.reduce((m, x) => Math.max(m, x.ordem || 0), 0) + 1)}"></div>
@@ -309,6 +943,96 @@
         const linha = { ...(s ? { id: s.id } : {}), nome, descricao: $('#f-desc').value.trim(), duracao_min: Math.round(dur), preco, foto, ordem: Number($('#f-ordem').value) || 0, ativo: $('#f-ativo').checked };
         const ok = await seguro(() => Api.salvar('servicos', linha).then(() => true), 'Não foi possível salvar.');
         if (ok) { fecharModal(); await recarregar(); toast('Serviço salvo.'); refazer(); }
+      },
+    });
+  }
+
+  /* ============================================================ Produtos */
+  const COLS_PRODUTO = ['id', 'nome', 'descricao', 'preco', 'estoque_minimo', 'ativo'];
+  async function vProdutos(c) {
+    const produtos = D.produtos || [];
+    const baixos = produtos.filter((p) => p.ativo && p.estoque <= p.estoque_minimo).length;
+    const estoqueTag = (p) => (p.estoque === 0 ? pill(['Sem estoque', 'err']) : p.estoque <= p.estoque_minimo ? pill(['Estoque baixo', 'warn']) : '');
+    c.innerHTML = `<div class="pg-topo"><div><h1>Produtos</h1><p>Itens vendidos no balcão. A venda é feita pelo detalhe do agendamento e baixa o estoque automaticamente.</p></div>
+        <div class="pg-acoes"><button type="button" class="btn btn--solid" data-produto-novo><i data-icon="plus"></i>Novo produto</button></div></div>
+      ${baixos ? `<div class="aviso-barra aviso-barra--alerta">${BJIcons.svg('alert')}<span><b>${plural(baixos, 'produto está', 'produtos estão')} com estoque baixo.</b> Registre a reposição para continuar vendendo.</span></div>` : ''}
+      <div class="cartao">${produtos.length ? `<div class="lista">${produtos.map((p) => `
+        <div class="item${p.ativo ? '' : ' inativo'}"><div class="item__foto item__foto--ic"><i data-icon="box"></i></div>
+          <div><div class="item__nome">${esc(p.nome)}${estoqueTag(p)}${p.ativo ? '' : '<span class="tag">Inativo</span>'}</div>
+            <div class="item__meta">${A.fmtBRL(p.preco)} · ${plural(p.estoque, 'unidade', 'unidades')} · mínimo ${p.estoque_minimo}</div></div>
+          <div class="item__acoes"><label class="chave" title="Disponível para venda"><input type="checkbox" data-produto-ativo="${p.id}" ${p.ativo ? 'checked' : ''} aria-label="Disponível para venda: ${esc(p.nome)}"><span></span></label>
+            <button type="button" class="btn btn--sm btn--sec" data-estoque="${p.id}">Estoque</button>
+            <button type="button" class="icone" data-produto-editar="${p.id}" aria-label="Editar ${esc(p.nome)}"><i data-icon="edit"></i></button>
+            <button type="button" class="icone perigo" data-produto-excluir="${p.id}" aria-label="Excluir ${esc(p.nome)}"><i data-icon="trash"></i></button></div>
+        </div>`).join('')}</div>` : vazio('box', 'Nenhum produto cadastrado', 'Cadastre pomadas, óleos e outros itens para vender junto com o atendimento.', '<button type="button" class="btn btn--sm btn--sec" data-produto-novo>Cadastrar produto</button>')}</div>`;
+    c.onclick = async (e) => {
+      if (e.target.closest('[data-produto-novo]')) return formProduto(null);
+      const ed = e.target.closest('[data-produto-editar]');
+      if (ed) return formProduto(produtos.find((p) => p.id === Number(ed.dataset.produtoEditar)));
+      const mov = e.target.closest('[data-estoque]');
+      if (mov) return formMovimentoEstoque(produtos.find((p) => p.id === Number(mov.dataset.estoque)));
+      const del = e.target.closest('[data-produto-excluir]');
+      if (del) {
+        const p = produtos.find((x) => x.id === Number(del.dataset.produtoExcluir));
+        if (!(await confirma([`Excluir o produto “${p.nome}”?`, 'Se ele já teve vendas ou movimentações, não poderá ser excluído; nesse caso, desative-o.'], 'Excluir'))) return;
+        if (await seguro(() => Api.excluir('produtos', p.id).then(() => true))) { await recarregar(); toast('Produto excluído.'); refazer(); }
+      }
+    };
+    c.onchange = async (e) => {
+      const toggle = e.target.closest('[data-produto-ativo]');
+      if (!toggle) return;
+      const produto = produtos.find((p) => p.id === Number(toggle.dataset.produtoAtivo));
+      const ok = await seguro(() => Api.salvar('produtos', { ...pick(produto, COLS_PRODUTO), ativo: toggle.checked }).then(() => true), 'Não foi possível alterar o produto.');
+      if (ok) { await recarregar(); toast(toggle.checked ? 'Produto ativado.' : 'Produto desativado.'); }
+      refazer();
+    };
+  }
+  function formProduto(produto) {
+    abrirModal({
+      titulo: produto ? 'Editar produto' : 'Novo produto',
+      corpo: `<div class="campo"><label for="p-nome">Nome</label><input id="p-nome" maxlength="80" value="${esc(produto ? produto.nome : '')}" required></div>
+        <div class="campo"><label for="p-desc">Descrição</label><textarea id="p-desc" maxlength="240">${esc(produto ? produto.descricao : '')}</textarea></div>
+        <div class="grade2"><div class="campo"><label for="p-preco">Preço de venda</label><div class="campo-moeda"><span>R$</span><input id="p-preco" inputmode="decimal" placeholder="0,00" value="${esc(produto ? fmtNum(produto.preco) : '')}" required></div></div>
+        <div class="campo"><label for="p-min">Estoque mínimo</label><input id="p-min" type="number" min="0" step="1" value="${produto ? produto.estoque_minimo : 0}" required></div></div>
+        ${produto ? `<div class="mini-box">Estoque atual: <strong>${produto.estoque} unidades</strong>. Use “Movimentar estoque” para registrar reposições ou saídas.</div>` : '<div class="campo"><label for="p-estoque">Estoque inicial</label><input id="p-estoque" type="number" min="0" step="1" value="0" required></div>'}
+        <div class="campo"><span class="rotulo">Ativo para venda</span><label class="chave"><input type="checkbox" id="p-ativo" ${!produto || produto.ativo ? 'checked' : ''} aria-label="Ativo para venda"><span></span></label></div>`,
+      rodape: '<button type="button" class="btn" data-fechar>Voltar</button><button type="submit" class="btn btn--solid">Salvar produto</button>',
+      async enviar() {
+        const nome = $('#p-nome').value.trim();
+        const preco = numBR($('#p-preco').value);
+        const estoqueMinimo = Number($('#p-min').value);
+        const estoque = produto ? undefined : Number($('#p-estoque').value);
+        if (!nome || preco === null || !Number.isFinite(preco) || preco < 0) return toast('Informe o nome e um preço válido.', false);
+        if (!Number.isInteger(estoqueMinimo) || estoqueMinimo < 0 || (!produto && (!Number.isInteger(estoque) || estoque < 0))) return toast('Estoque deve ser um número inteiro não negativo.', false);
+        const linha = { ...(produto ? { id: produto.id } : { estoque }), nome, descricao: $('#p-desc').value.trim(), preco, estoque_minimo: estoqueMinimo, ativo: $('#p-ativo').checked };
+        const ok = await seguro(() => Api.salvar('produtos', linha).then(() => true), 'Não foi possível salvar o produto.');
+        if (ok) { fecharModal(); await recarregar(); toast('Produto salvo.'); refazer(); }
+      },
+    });
+  }
+  function formMovimentoEstoque(produto) {
+    abrirModal({
+      titulo: 'Movimentar estoque',
+      corpo: `<p class="sub">${esc(produto.nome)} · estoque atual: <strong>${produto.estoque}</strong></p>
+        <div class="campo"><label for="m-tipo">Movimento</label><select id="m-tipo"><option value="entrada">Entrada</option><option value="ajuste">Saída</option></select></div>
+        <div class="campo"><label for="m-qtd">Quantidade de unidades</label><input id="m-qtd" type="number" min="1" step="1" value="1" required></div>
+        <div class="campo"><label for="m-motivo">Observação</label><input id="m-motivo" maxlength="120" placeholder="Ex.: compra de reposição"></div>
+        <div class="campo"><span class="rotulo">Movimentações recentes</span><div class="mini-box" id="m-historico">Carregando histórico...</div></div>`,
+      rodape: '<button type="button" class="btn" data-fechar>Voltar</button><button type="submit" class="btn btn--solid">Registrar movimento</button>',
+      aberto() {
+        seguro(async () => {
+          const movimentos = await Api.movimentosEstoque(produto.id);
+          const labels = { entrada: 'Entrada', ajuste: 'Saída', venda: 'Venda' };
+          const html = movimentos.length ? movimentos.map((m) => `<div class="det__pagamento"><span>${esc(labels[m.tipo] || m.tipo)}${m.agendamento_codigo ? ` · ${esc(m.agendamento_codigo)}` : ''}<small style="display:block;color:var(--muted)">${esc(m.motivo)} · ${new Date(m.criado_em.replace(' ', 'T')).toLocaleString('pt-BR')}</small></span><strong>${m.quantidade > 0 ? '+' : ''}${m.quantidade} un.</strong></div>`).join('') : 'Nenhum movimento registrado.';
+          const host = $('#m-historico');
+          if (host) host.innerHTML = html;
+        }, 'Não foi possível carregar o histórico.');
+      },
+      async enviar() {
+        const quantidade = Number($('#m-qtd').value);
+        if (!Number.isInteger(quantidade) || quantidade < 1) return toast('Informe uma quantidade inteira maior que zero.', false);
+        const ok = await seguro(() => Api.movimentarEstoque(produto.id, quantidade, $('#m-tipo').value, $('#m-motivo').value.trim()).then(() => true), 'Não foi possível atualizar o estoque.');
+        if (ok) { fecharModal(); await recarregar(); toast('Movimento de estoque registrado.'); refazer(); }
       },
     });
   }
@@ -347,7 +1071,7 @@
       titulo: b ? 'Editar combo' : 'Novo combo',
       corpo: `<div class="campo"><label for="c-nome">Nome</label><input id="c-nome" value="${esc(b ? b.nome : '')}" maxlength="60" placeholder="Ex.: Corte + Barba" required></div>
         <div class="campo"><span class="rotulo" id="c-srv-r">Serviços do combo (mínimo 2)</span><div class="checks" role="group" aria-labelledby="c-srv-r">${D.servicos.map((s) => `<label><input type="checkbox" name="c-srv" value="${s.id}" ${b && b.servico_ids.includes(s.id) ? 'checked' : ''}>${esc(s.nome)} <span style="color:var(--muted);margin-left:auto;font-size:12px">${s.duracao_min} min · ${esc(brl(s.preco))}</span></label>`).join('')}</div></div>
-        <div class="grade2"><div class="campo"><label for="c-preco">Preço do combo (R$)</label><input id="c-preco" inputmode="decimal" value="${esc(b ? fmtNum(b.preco) : '')}" required></div>
+        <div class="grade2"><div class="campo"><label for="c-preco">Preço do combo</label><div class="campo-moeda"><span>R$</span><input id="c-preco" inputmode="decimal" placeholder="0,00" value="${esc(b ? fmtNum(b.preco) : '')}" required></div></div>
         <div class="campo"><label for="c-dur">Duração (minutos)</label><input id="c-dur" type="number" min="5" max="900" placeholder="vazio = soma" value="${b && b.duracao_min != null ? b.duracao_min : ''}"><small>Vazio = soma das durações.</small></div></div>
         <div class="campo"><label for="c-desc">Descrição</label><textarea id="c-desc" maxlength="300">${esc(b ? b.descricao : '')}</textarea></div>
         ${uploadHtml('c-foto', foto, { rotulo: 'Foto do combo' })}

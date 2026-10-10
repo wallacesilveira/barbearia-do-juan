@@ -18,7 +18,10 @@
   /* ------------------------------------------------------------ utilidades */
   const agora = () => { const d = new Date(); return { data: A.isoDate(d), min: d.getHours() * 60 + d.getMinutes() }; };
   const preco = () => A.calcPricing([...S.ids], S.site.servicos, S.site.combos);
-  const totalTxt = (p) => (p.consulta ? (p.total ? A.fmtBRL(p.total) + ' + a consultar' : 'A consultar') : A.fmtBRL(p.total));
+  const totalTxt = (p) => {
+    const total = Number(p.total || 0);
+    return p.consulta ? (total ? A.fmtBRL(total) + ' + a consultar' : 'A consultar') : A.fmtBRL(total);
+  };
   const dataLonga = (iso) => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }); };
   const dataCurta = (iso) => { const [y, m, d] = iso.split('-').map(Number); const s = new Date(y, m - 1, d).toLocaleDateString('pt-BR', { weekday: 'long' }); return s.charAt(0).toUpperCase() + s.slice(1, 3) + ', ' + A.fmtData(iso); };
   function toast(msg, ok) {
@@ -63,6 +66,7 @@
     if (S.etapa === 1 || S.etapa === 6) location.href = 'index.html';
     else history.length > 1 && history.state && history.state.etapa ? history.back() : ir(S.etapa - 1, { empilhar: false });
   });
+  $('#fechar-agendamento').addEventListener('click', () => { location.href = 'index.html'; });
 
   /* ----------------------------------------------------------- renderização */
   function stepper() {
@@ -81,13 +85,13 @@
     const linhas = S.site.servicos.map((s) => `
       <label class="linha"><input type="checkbox" value="${s.id}" ${S.ids.has(s.id) ? 'checked' : ''}>
         <span class="chk">${BJIcons.svg('check')}</span>
-        <span class="nome">${esc(s.nome)}</span><span class="dur">${s.duracao_min} min</span>
+        <span class="nome">${esc(s.nome)}</span>
         <span class="preco${s.preco == null ? ' consulta' : ''}">${esc(BJ.preco(s))}</span></label>`).join('');
     const combos = p.linhas.filter((l) => l.tipo === 'combo');
     const aviso = combos.length ? `<div class="combo-aviso">${BJIcons.svg('star')}<div>Combo aplicado: <b>${esc(combos.map((c) => c.nome).join(', '))}</b>${p.economia ? ` — você economiza <b>${A.fmtBRL(p.economia)}</b>.` : '.'}</div></div>` : '';
     $('#tela').innerHTML = `<h1 tabindex="-1">Escolha os serviços</h1><p class="sub">Selecione um ou mais serviços.</p>
       <div class="linhas" role="group" aria-label="Serviços">${linhas || '<p class="vazio-msg">Nenhum serviço disponível no momento.</p>'}</div>${aviso}`;
-    rodape(`<div class="total"><span>Total: <b>${esc(totalTxt(p))}</b></span><span><b>${p.duracao ? A.fmtDur(p.duracao) : '—'}</b></span></div>
+    rodape(`<div class="total"><span>Total: <b>${esc(totalTxt(p))}</b></span></div>
       <button class="btn btn--solid" data-acao="continuar" ${S.ids.size ? '' : 'disabled'}>Continuar</button>`);
   }
 
@@ -101,7 +105,7 @@
       if (!av) { av = document.createElement('div'); av.className = 'combo-aviso'; $('#tela').appendChild(av); }
       av.innerHTML = html;
     } else if (av) av.remove();
-    rodape(`<div class="total"><span>Total: <b>${esc(totalTxt(p))}</b></span><span><b>${p.duracao ? A.fmtDur(p.duracao) : '—'}</b></span></div>
+    rodape(`<div class="total"><span>Total: <b>${esc(totalTxt(p))}</b></span></div>
       <button class="btn btn--solid" data-acao="continuar" ${S.ids.size ? '' : 'disabled'}>Continuar</button>`);
   }
 
@@ -133,7 +137,7 @@
       const livre = diaLivreNoCalendario(iso, p.duracao);
       cel += `<button type="button" class="dia${iso === hoje.data ? ' hoje' : ''}${iso === S.data ? ' sel' : ''}" data-dia="${iso}" ${livre ? '' : 'disabled'} aria-label="${dataLonga(iso)}${livre ? '' : ', indisponível'}" ${iso === S.data ? 'aria-pressed="true"' : ''}>${d}</button>`;
     }
-    $('#tela').innerHTML = `<h1 tabindex="-1">Escolha a data</h1><p class="sub">Atendimento de ${A.fmtDur(p.duracao)}.</p>
+    $('#tela').innerHTML = `<h1 tabindex="-1">Escolha a data</h1><p class="sub">Selecione uma data disponível.</p>
       <div class="cal-nav"><button type="button" data-mes="-1" aria-label="Mês anterior" ${noMesAtual ? 'disabled' : ''}>${BJIcons.svg('left')}</button>
         <strong aria-live="polite">${A.MESES[m]} ${y}</strong>
         <button type="button" data-mes="1" aria-label="Próximo mês" ${proxIso > maxIso ? 'disabled' : ''}>${BJIcons.svg('right')}</button></div>
@@ -162,6 +166,7 @@
   function telaHorario() {
     const p = preco();
     let corpo;
+    let cruzaAlmoco = false;
     if (S.carregandoHorarios) {
       corpo = `<div class="slots skel" aria-busy="true">${'<button class="slot" disabled></button>'.repeat(9)}</div>`;
     } else if (S.erroHorarios) {
@@ -169,24 +174,25 @@
     } else {
       const slots = A.gerarHorarios(ctxHorario());
       const livres = slots.filter((s) => s.livre).length;
+      cruzaAlmoco = slots.some((s) => s.motivo === 'ALMOCO');
       corpo = livres
         ? `<div class="slots" role="group" aria-label="Horários">${slots.map((s) => `<button type="button" class="slot" data-h="${s.inicio_min}" ${s.livre ? '' : 'disabled aria-label="' + A.fmtMin(s.inicio_min) + ', indisponível"'} aria-pressed="${S.inicio === s.inicio_min}">${A.fmtMin(s.inicio_min)}</button>`).join('')}</div>`
-        : `<div class="vazio-msg">Não há horários disponíveis nesta data para ${A.fmtDur(p.duracao)} de atendimento.<br>Escolha outra data.</div>`;
+        : '<div class="vazio-msg">Não há horários disponíveis nesta data para os serviços escolhidos.<br>Escolha outra data.</div>';
     }
     const al = A.almoco(S.site.config);
     $('#tela').innerHTML = `<h1 tabindex="-1">Horários disponíveis</h1>
       <div class="data-linha">${BJIcons.svg('calendar')}<span>${dataLonga(S.data)}</span></div>${corpo}
       ${al ? `<p class="nota">${BJIcons.svg('clock')}Horário de almoço: ${A.fmtMin(al.ini)} às ${A.fmtMin(al.fim)}</p>` : ''}
-      <p class="nota">Duração total: ${A.fmtDur(p.duracao)}${S.inicio != null ? ` · termina às ${A.fmtMin(S.inicio + p.duracao)}` : ''}</p>`;
+      ${al && cruzaAlmoco ? `<p class="nota">${BJIcons.svg('info')}Alguns horários ficam indisponíveis por causa do intervalo de almoço.</p>` : ''}`;
     rodape(`<button class="btn btn--solid" data-acao="continuar" ${S.inicio != null ? '' : 'disabled'}>Continuar</button>`);
   }
 
   function telaDados() {
     const e = S.erros;
-    $('#tela').innerHTML = `<h1 tabindex="-1">Seus dados</h1><p class="sub">Usaremos para confirmar e, se preciso, falar com você.</p>
+    $('#tela').innerHTML = `<h1 tabindex="-1">Seus dados</h1><p class="sub">Usamos seu WhatsApp só para confirmar o horário e avisar se algo mudar.</p>
       <form id="form-dados" novalidate>
-        <div class="campo"><label for="nome">Nome completo</label>
-          <input id="nome" name="nome" type="text" autocomplete="name" placeholder="Digite seu nome" maxlength="80" value="${esc(S.nome)}" required ${e.nome ? 'aria-invalid="true" aria-describedby="e-nome"' : ''}>
+        <div class="campo"><label for="nome">Nome e sobrenome</label>
+          <input id="nome" name="nome" type="text" autocomplete="name" placeholder="Digite seu nome e sobrenome" maxlength="80" value="${esc(S.nome)}" required ${e.nome ? 'aria-invalid="true" aria-describedby="e-nome"' : ''}>
           <span class="erro" id="e-nome">${esc(e.nome || '')}</span></div>
         <div class="campo"><label for="whats">WhatsApp</label>
           <input id="whats" name="whats" type="tel" inputmode="tel" autocomplete="tel-national" placeholder="(11) 9 9999-9999" maxlength="16" value="${esc(S.whats)}" required ${e.whats ? 'aria-invalid="true" aria-describedby="e-whats"' : ''}>
@@ -197,16 +203,14 @@
   }
 
   function blocoResumo(o) {
-    // o = { data, inicio, dur, servicosLinhas:[{nome,dur,preco}], total }
     return `<div class="resumo">
       <h2>Agendamento</h2>
       <dl>
         <div class="par"><dt>Data</dt><dd>${esc(dataCurta(o.data))}</dd></div>
-        <div class="par"><dt>Horário</dt><dd>${A.fmtMin(o.inicio)} – ${A.fmtMin(o.inicio + o.dur)}</dd></div>
+        <div class="par"><dt>Horário</dt><dd>${A.fmtMin(o.inicio)}</dd></div>
       </dl><div class="sep"></div>
       <dl>
-        <div class="par" style="flex-direction:column;gap:2px"><dt>Serviços</dt><dd style="text-align:left">${o.linhas.map((l) => `<div class="item"><span>${esc(l.nome)} <small>(${l.dur} min)</small></span><span>${l.preco == null ? 'Sob consulta' : A.fmtBRL(l.preco)}</span></div>`).join('')}</dd></div>
-        <div class="par"><dt>Duração total</dt><dd>${A.fmtDur(o.dur)}</dd></div>
+        <div class="par" style="flex-direction:column;gap:2px"><dt>Serviços</dt><dd style="text-align:left">${o.linhas.map((l) => `<div class="item"><span>${esc(l.nome)}</span><span>${l.preco == null ? 'Sob consulta' : A.fmtBRL(l.preco)}</span></div>`).join('')}</dd></div>
         <div class="par tot"><dt>Valor total</dt><dd>${esc(o.total)}</dd></div>
       </dl>
       ${o.cliente ? `<div class="sep"></div><dl><div class="par"><dt>Nome</dt><dd>${esc(o.cliente.nome)}</dd></div><div class="par"><dt>WhatsApp</dt><dd>${esc(mascara(o.cliente.whatsapp))}</dd></div></dl>` : ''}
@@ -216,11 +220,11 @@
   function telaConfirmar() {
     const p = preco();
     const linhas = p.linhas.map((l) => (l.tipo === 'combo'
-      ? { nome: l.nome + ' (combo)', dur: l.duracao_min, preco: l.preco }
-      : { nome: l.nome, dur: l.duracao_min, preco: l.preco }));
+      ? { nome: l.nome + ' (combo)', preco: l.preco }
+      : { nome: l.nome, preco: l.preco }));
     $('#tela').innerHTML = `<h1 tabindex="-1">Confirme seu agendamento</h1><p class="sub">Confira os dados antes de confirmar.</p>
       ${S.alerta ? `<div class="alerta" role="alert">${BJIcons.svg('close')}<div>${esc(S.alerta)}</div></div>` : ''}
-      ${blocoResumo({ data: S.data, inicio: S.inicio, dur: p.duracao, linhas, total: totalTxt(p), cliente: { nome: S.nome.trim(), whatsapp: S.whats } })}`;
+      ${blocoResumo({ data: S.data, inicio: S.inicio, dur: p.duracao, linhas, total: totalTxt(p), cliente: { nome: BJ.nome(S.nome), whatsapp: S.whats } })}`;
     rodape(`<button class="btn btn--solid" data-acao="confirmar" ${S.enviando ? 'disabled' : ''}>${S.enviando ? '<span class="spinner" aria-hidden="true"></span>Confirmando…' : 'Confirmar agendamento'}</button>`);
   }
 
@@ -228,7 +232,7 @@
     const a = S.resultado;
     const tot = a.valor_consulta ? (Number(a.valor_total) ? A.fmtBRL(a.valor_total) + ' + a consultar' : 'A consultar') : A.fmtBRL(a.valor_total);
     // linhas iguais às da confirmação (mesma regra de combo); o total exibido vem do servidor
-    const linhas = preco().linhas.map((l) => ({ nome: l.tipo === 'combo' ? l.nome + ' (combo)' : l.nome, dur: l.duracao_min, preco: l.preco }));
+    const linhas = preco().linhas.map((l) => ({ nome: l.tipo === 'combo' ? l.nome + ' (combo)' : l.nome, preco: l.preco }));
     const html = blocoResumo({ data: a.data, inicio: a.inicio_min, dur: a.duracao_min, linhas, total: tot, cliente: a.cliente });
     $('#tela').innerHTML = `<div class="sucesso">
       <div class="selo">${BJIcons.svg('check-circle')}</div>
@@ -250,7 +254,6 @@
 *Data:* ${A.fmtData(a.data)}
 *Horário:* ${A.fmtMin(a.inicio_min)}
 *Serviços:* ${a.servicos.map((s) => s.nome).join(', ')}
-*Duração:* ${A.fmtDur(a.duracao_min)}
 *Nome:* ${a.cliente.nome}
 
 Até lá!`;
@@ -302,17 +305,39 @@ Até lá!`;
   });
   $('#rodape').addEventListener('click', (e) => { const b = e.target.closest('button[data-acao]'); if (b) acao(b.dataset.acao); });
   $('#tela').addEventListener('input', (e) => {
-    if (e.target.id === 'whats') { e.target.value = mascara(e.target.value); S.whats = e.target.value; }
-    if (e.target.id === 'nome') S.nome = e.target.value;
+    if (e.target.id === 'whats') { e.target.value = mascara(e.target.value); S.whats = e.target.value; limparErro('whats', !erroWhats(S.whats)); }
+    if (e.target.id === 'nome') { S.nome = e.target.value; limparErro('nome', !erroNome(S.nome)); }
   });
   $('#tela').addEventListener('submit', (e) => { e.preventDefault(); acao('continuar'); });
 
+  function erroNome(v) {
+    const n = v.trim().replace(/\s+/g, ' ');
+    if (!n) return 'Digite seu nome.';
+    if (!/\S+\s+\S+/.test(n)) return 'Digite também o sobrenome (ex.: João Silva).';
+    if (n.length < 3) return 'Nome muito curto.';
+    return '';
+  }
+  function erroWhats(v) {
+    const d = v.replace(/\D/g, '');
+    if (!d) return 'Digite seu WhatsApp.';
+    if (d.length < 10) return 'Faltam números. Inclua o DDD: (11) 9 9999-9999.';
+    if (!whatsValido(d)) return 'Confira o número: celular tem 11 dígitos com DDD e começa com 9.';
+    return '';
+  }
   function validarDados() {
     const er = {};
-    if (S.nome.trim().replace(/\s+/g, ' ').length < 3 || !/\S+\s+\S+/.test(S.nome.trim())) er.nome = 'Informe seu nome completo.';
-    if (!whatsValido(S.whats.replace(/\D/g, ''))) er.whats = 'Informe um WhatsApp válido com DDD.';
+    const n = erroNome(S.nome), w = erroWhats(S.whats);
+    if (n) er.nome = n;
+    if (w) er.whats = w;
     S.erros = er;
     return !Object.keys(er).length;
+  }
+  /** Remove a mensagem de erro assim que o campo fica correto, sem redesenhar a tela. */
+  function limparErro(campo, valido) {
+    if (!S.erros[campo] || !valido) return;
+    delete S.erros[campo];
+    const msg = $(campo === 'nome' ? '#e-nome' : '#e-whats'); if (msg) msg.textContent = '';
+    const inp = $(campo === 'nome' ? '#nome' : '#whats'); if (inp) inp.removeAttribute('aria-invalid');
   }
 
   async function acao(a) {
@@ -330,7 +355,13 @@ Até lá!`;
     if (S.enviando) return;
     S.enviando = true; S.alerta = null; render(false);
     try {
-      const r = await Api.agendar({ data: S.data, inicio_min: S.inicio, servico_ids: [...S.ids], nome: S.nome.trim().replace(/\s+/g, ' '), whatsapp: S.whats.replace(/\D/g, '') });
+      const r = await Api.agendar({
+        data: S.data,
+        inicio_min: S.inicio,
+        servico_ids: [...S.ids],
+        nome: BJ.nome(S.nome),
+        whatsapp: S.whats.replace(/\D/g, ''),
+      });
       S.enviando = false;
       if (r.ok) { $('#toast').hidden = true; S.resultado = r.agendamento; history.replaceState({ etapa: 6 }, ''); S.etapa = 6; render(true); return; }
       if (CONFLITOS.includes(r.erro)) { // horário perdeu a disponibilidade: volta e atualiza a lista
