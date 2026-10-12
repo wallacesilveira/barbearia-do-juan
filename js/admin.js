@@ -77,6 +77,9 @@
 
   function toast(msg, ok = true) {
     const t = $('#toast');
+    // modais abertos ficam na camada superior do navegador: o aviso precisa morar dentro do modal para aparecer por cima
+    const host = $$('dialog[open]').pop() || document.body;
+    if (t.parentElement !== host) host.appendChild(t);
     t.textContent = msg; t.className = 'toast' + (ok ? ' ok' : ''); t.hidden = false;
     clearTimeout(toast.t); toast.t = setTimeout(() => { t.hidden = true; }, ok ? 3500 : 7000);
   }
