@@ -842,7 +842,8 @@
       return l.length > 1 ? l.slice(0, -1).join(', ') + ' e ' + l[l.length - 1] : l[0];
     };
 
-    c.innerHTML = `<div class="pg-topo"><div><h1>Clientes</h1><p>Quem mais frequenta, quanto cada cliente já movimentou e os dias de maior procura.</p></div></div>
+    c.innerHTML = `<div class="pg-topo"><div><h1>Clientes</h1><p>Quem mais frequenta, quanto cada cliente já movimentou e os dias de maior procura.</p></div>
+        <div class="pg-acoes"><button type="button" class="btn btn--solid" data-novo-cli><i data-icon="plus"></i>Novo cliente</button></div></div>
       <div class="kpis">
         ${kpi('Clientes', clientes.length, comVisita.length ? `${comVisita.length} já atendidos` : '')}
         ${kpi('Voltaram 2+ vezes', recorrentes, comVisita.length ? Math.round((recorrentes / comVisita.length) * 100) + '% dos atendidos' : '')}
@@ -889,30 +890,39 @@
     c.onchange = (e) => { if (e.target.id === 'cli-ordem') { S.ordemCli = e.target.value; lista(); } };
     c.onclick = (e) => {
       if (e.target.closest('[data-mais]')) { S.limiteCli += 30; lista(); return; }
+      if (e.target.closest('[data-novo-cli]')) return formCliente(null, refazer);
       const ed = e.target.closest('[data-editar-cli]');
       if (ed) formCliente(clientes.find((x) => String(x.id) === ed.dataset.editarCli), refazer);
     };
   }
 
+  /** Cria (cli = null) ou edita um contato. */
   function formCliente(cli, aoSalvar) {
-    const atual = digitos(cli.whatsapp);
+    const novo = !cli;
+    const atual = novo ? '' : digitos(cli.whatsapp);
     const foraDoPadrao = atual && !telValido(atual.length > 11 && atual.startsWith('55') ? atual.slice(2) : atual);
     abrirModal({
-      titulo: 'Editar contato',
-      corpo: `<div class="det-cab"><span class="avatar">${esc(iniciais(cli.nome))}</span><div class="det-cab__txt"><strong>${esc(cli.nome)}</strong>
-          <span>${plural(cli.visitas, 'visita', 'visitas')}${cli.ultima_visita ? ' · última em ' + A.fmtData(cli.ultima_visita) : ''}</span></div></div>
-        <div class="campo"><label for="cli-nome">Nome</label><input id="cli-nome" maxlength="80" autocomplete="off" value="${esc(cli.nome)}" required></div>
+      titulo: novo ? 'Novo cliente' : 'Editar contato',
+      corpo: `${novo ? '<p class="sub">Cadastre um cliente para encontrá-lo depois ao agendar pelo painel.</p>' : `<div class="det-cab"><span class="avatar">${esc(iniciais(cli.nome))}</span><div class="det-cab__txt"><strong>${esc(cli.nome)}</strong>
+          <span>${plural(cli.visitas, 'visita', 'visitas')}${cli.ultima_visita ? ' · última em ' + A.fmtData(cli.ultima_visita) : ''}</span></div></div>`}
+        <div class="campo"><label for="cli-nome">Nome</label><input id="cli-nome" maxlength="80" autocomplete="off" value="${esc(novo ? '' : cli.nome)}" placeholder="Nome e sobrenome" required></div>
         <div class="campo"><label for="cli-whats">WhatsApp <span class="opcional">opcional</span></label><input id="cli-whats" ${CAMPO_TEL} value="${esc(foraDoPadrao ? atual : BJ.tel(atual))}">
-          ${foraDoPadrao ? `<small class="aviso-campo">O número salvo (${esc(atual)}) está fora do padrão. Confira e corrija.</small>` : '<small>DDD + número. Deixe vazio se o cliente não tiver.</small>'}</div>`,
-      rodape: '<button type="button" class="btn" data-fechar>Cancelar</button><button type="submit" class="btn btn--solid">Salvar contato</button>',
-      aberto() { const i = $('#cli-whats'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); },
+          ${foraDoPadrao ? `<small class="aviso-campo">O número salvo (${esc(atual)}) está fora do padrão. Confira e corrija.</small>` : '<small>DDD + número. Deixe vazio se o cliente não tiver.</small>'}</div>
+        <div class="grade2"><div class="campo"><label for="cli-email">E-mail <span class="opcional">opcional</span></label><input id="cli-email" type="email" inputmode="email" maxlength="120" autocomplete="off" placeholder="nome@gmail.com" value="${esc(novo ? '' : cli.email || '')}"></div>
+          <div class="campo"><label for="cli-aniv">Aniversário <span class="opcional">opcional</span></label><input id="cli-aniv" type="date" min="1900-01-01" max="${hojeIso()}" value="${esc(novo ? '' : cli.aniversario || '')}"></div></div>`,
+      rodape: `<button type="button" class="btn" data-fechar>Cancelar</button><button type="submit" class="btn btn--solid">${novo ? 'Cadastrar cliente' : 'Salvar contato'}</button>`,
+      aberto() { const i = $(novo ? '#cli-nome' : '#cli-whats'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); },
       async enviar() {
         const nome = BJ.nome($('#cli-nome').value);
         const whatsapp = digitos($('#cli-whats').value);
         if (!nome) { $('#cli-nome').focus(); return toast('Informe o nome do cliente.', false); }
         if (whatsapp && !telValido(whatsapp)) { $('#cli-whats').focus(); return toast('WhatsApp incompleto: use DDD + número, ex.: (11)98765-4321.', false); }
-        const ok = await seguro(() => Api.salvarCliente(cli.id, nome, whatsapp).then(() => true));
-        if (ok) { fecharModal(); toast('Contato atualizado.'); aoSalvar(); }
+        const email = $('#cli-email').value.trim();
+        if (email && !$('#cli-email').checkValidity()) { $('#cli-email').focus(); return toast('E-mail inválido. Ex.: nome@gmail.com', false); }
+        const aniversario = $('#cli-aniv').value;
+        if (aniversario && aniversario > hojeIso()) { $('#cli-aniv').focus(); return toast('A data de aniversário não pode estar no futuro.', false); }
+        const ok = await seguro(() => Api.salvarCliente(novo ? null : cli.id, { nome, whatsapp, email, aniversario }).then(() => true));
+        if (ok) { fecharModal(); toast(novo ? `${nome} cadastrado.` : 'Contato atualizado.'); aoSalvar(); }
       },
     });
   }

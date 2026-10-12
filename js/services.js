@@ -65,7 +65,8 @@
     logado() { return !!guardar.get(); },
     carregarAdmin() { return this._get('admin/site'); },
     clientes() { return this._get('admin/clientes'); },
-    salvarCliente(id, nome, whatsapp) { return this._post('admin/cliente', { id, nome, whatsapp }); },
+    /** dados = { nome, whatsapp, email, aniversario } — id null cria um cliente novo. */
+    salvarCliente(id, dados) { return this._post('admin/cliente', { id, ...dados }); },
     caixa() { return this._get('admin/indicadores'); },
     alertas() { return this._get('admin/alertas'); },
     marcarAlertasLidos(ids) { return this._post('admin/alertas/lidos', { ids: ids || [] }); },
@@ -182,14 +183,30 @@
       const r = await this._rpc('clientes_resumo', {});
       return { ...r, clientes: r.clientes.map((c) => ({ ...c, total_gasto: Number(c.total_gasto) })) };
     },
-    async salvarCliente(id, nome, whatsapp) {
-      let wa = String(whatsapp || '').replace(/\D/g, '');
+    async salvarCliente(id, dados) {
+      let wa = String(dados.whatsapp || '').replace(/\D/g, '');
       if (wa.length > 11 && wa.startsWith('55')) wa = wa.slice(2);
-      nome = window.BJ.nome(nome);
+      const nome = window.BJ.nome(dados.nome);
+      const email = String(dados.email || '').trim().toLowerCase();
+      const aniversario = String(dados.aniversario || '').trim() || null;
       if (!nome || nome.length > 80 || (wa && wa.length !== 10 && wa.length !== 11)) throw new ApiError(400, 'DADOS_INVALIDOS', 'Confira o nome e o WhatsApp (DDD + número).');
-      if (wa && (await this._rest(`clientes?select=id&whatsapp=eq.${wa}&id=neq.${Number(id)}`)).length) throw new ApiError(409, 'WHATSAPP_EM_USO', 'Já existe outro cliente com esse WhatsApp.');
-      const r = await this._rest('clientes?id=eq.' + Number(id), { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ nome, whatsapp: wa }) });
-      return r[0];
+      if (email && (email.length > 120 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) throw new ApiError(400, 'EMAIL_INVALIDO', 'E-mail inválido. Ex.: nome@gmail.com');
+      if (aniversario && (!/^\d{4}-\d{2}-\d{2}$/.test(aniversario) || aniversario < '1900-01-01' || aniversario > A.isoDate(new Date()))) throw new ApiError(400, 'ANIVERSARIO_INVALIDO', 'Data de aniversário inválida.');
+      const outro = id ? `&id=neq.${Number(id)}` : '';
+      if (wa && (await this._rest(`clientes?select=id&whatsapp=eq.${wa}${outro}`)).length) throw new ApiError(409, 'WHATSAPP_EM_USO', 'Já existe outro cliente com esse WhatsApp.');
+      if (!wa && (await this._rest(`clientes?select=id&whatsapp=eq.&nome=ilike.${encodeURIComponent(nome.replace(/[%_*]/g, ''))}${outro}`)).length) throw new ApiError(409, 'CLIENTE_EXISTE', 'Já existe um cliente sem telefone com esse nome.');
+      const gravar = (corpo) => (id
+        ? this._rest('clientes?id=eq.' + Number(id), { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(corpo) })
+        : this._rest('clientes', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(corpo) }));
+      try {
+        return (await gravar({ nome, whatsapp: wa, email, aniversario }))[0];
+      } catch (e) {
+        // banco ainda sem as colunas novas (SQL de e-mail/aniversário não rodado): salva o básico e avisa
+        if (!/email|aniversario/.test(e.message) || !/column|coluna|schema/i.test(e.message)) throw e;
+        const r = (await gravar({ nome, whatsapp: wa }))[0];
+        if (email || aniversario) throw new ApiError(400, 'SEM_COLUNAS', 'Nome e WhatsApp salvos. E-mail e aniversário precisam de uma atualização no banco (Supabase).');
+        return r;
+      }
     },
     async alertas() {
       const [alertas, naoLidos] = await Promise.all([

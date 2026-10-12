@@ -76,6 +76,8 @@ create table if not exists clientes (
   whatsapp text not null,
   criado_em timestamptz not null default now()
 );
+alter table clientes add column if not exists email text not null default '';
+alter table clientes add column if not exists aniversario date;
 
 create table if not exists agendamentos (
   id bigint generated always as identity primary key,
@@ -843,7 +845,7 @@ declare
 begin
   if not public.is_admin() then raise exception 'NAO_AUTORIZADO' using errcode = '42501'; end if;
   select coalesce(jsonb_agg(to_jsonb(x) order by x.visitas desc, x.total_gasto desc, lower(x.nome)), '[]'::jsonb) into v_clientes
-    from (select c.id, c.nome, c.whatsapp, c.criado_em,
+    from (select c.id, c.nome, c.whatsapp, c.email, c.aniversario, c.criado_em,
                  count(a.id) filter (where a.status = 'confirmado' and a.data <= v_hoje) as visitas,
                  count(a.id) filter (where a.status = 'confirmado' and a.data > v_hoje) as futuros,
                  coalesce(sum(a.valor_total) filter (where a.status = 'confirmado' and a.data <= v_hoje), 0) as total_gasto,

@@ -123,6 +123,12 @@ try {
 } catch (e) {
   /* coluna já existe */
 }
+// contato do cliente: e-mail e aniversário (opcionais)
+{
+  const colsCli = db.prepare('PRAGMA table_info(clientes)').all().map((c) => c.name);
+  if (!colsCli.includes('email')) db.exec("ALTER TABLE clientes ADD COLUMN email TEXT NOT NULL DEFAULT ''");
+  if (!colsCli.includes('aniversario')) db.exec('ALTER TABLE clientes ADD COLUMN aniversario TEXT');
+}
 
 /* --------------------------------------------------------------- dados base */
 function seed() {
@@ -323,7 +329,7 @@ function resumoCaixaDiario(data) {
 function clientesResumo() {
   const hoje = agoraSP().data;
   const clientes = db.prepare(`
-    SELECT c.id, c.nome, c.whatsapp, c.criado_em,
+    SELECT c.id, c.nome, c.whatsapp, c.email, c.aniversario, c.criado_em,
       COALESCE(SUM(CASE WHEN a.status = 'confirmado' AND a.data <= :hoje THEN 1 END), 0) AS visitas,
       COALESCE(SUM(CASE WHEN a.status = 'confirmado' AND a.data > :hoje THEN 1 END), 0) AS futuros,
       COALESCE(SUM(CASE WHEN a.status = 'confirmado' AND a.data <= :hoje THEN a.valor_total END), 0) AS total_gasto,
@@ -335,6 +341,8 @@ function clientesResumo() {
     id: c.id,
     nome: padronizarNome(c.nome),
     whatsapp: c.whatsapp,
+    email: c.email || '',
+    aniversario: c.aniversario || null,
     criado_em: c.criado_em,
     visitas: Number(c.visitas),
     futuros: Number(c.futuros),
@@ -612,20 +620,38 @@ async function api(req, res, url) {
     if (m === 'GET' && rota === 'admin/clientes') return json(res, 200, clientesResumo());
     if (m === 'POST' && rota === 'admin/cliente') {
       const b = await lerCorpo(req);
-      const id = Number(b.id);
+      const novo = b.id == null || b.id === '';
+      const id = novo ? 0 : Number(b.id);
       const nome = padronizarNome(b.nome);
       let wa = DIGITOS(b.whatsapp);
       if (wa.length > 11 && wa.startsWith('55')) wa = wa.slice(2);
-      if (!Number.isInteger(id) || id < 1 || !nome || nome.length > 80 || (wa && wa.length !== 10 && wa.length !== 11)) {
+      if ((!novo && (!Number.isInteger(id) || id < 1)) || !nome || nome.length > 80 || (wa && wa.length !== 10 && wa.length !== 11)) {
         throw new Erro(400, 'DADOS_INVALIDOS', 'Confira o nome e o WhatsApp (DDD + número).');
       }
-      if (!db.prepare('SELECT 1 FROM clientes WHERE id = ?').get(id)) throw new Erro(404, 'CLIENTE_NAO_ENCONTRADO', 'Cliente não encontrado.');
+      const email = String(b.email || '').trim().toLowerCase();
+      if (email && (email.length > 120 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) throw new Erro(400, 'EMAIL_INVALIDO', 'E-mail inválido. Ex.: nome@gmail.com');
+      const aniversario = String(b.aniversario || '').trim() || null;
+      if (aniversario) {
+        const [y, mo, d] = aniversario.split('-').map(Number);
+        const dt = new Date(Date.UTC(y, mo - 1, d));
+        const valida = /^\d{4}-\d{2}-\d{2}$/.test(aniversario) && dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
+        if (!valida || y < 1900 || aniversario > agoraSP().data) throw new Erro(400, 'ANIVERSARIO_INVALIDO', 'Data de aniversário inválida.');
+      }
+      if (!novo && !db.prepare('SELECT 1 FROM clientes WHERE id = ?').get(id)) throw new Erro(404, 'CLIENTE_NAO_ENCONTRADO', 'Cliente não encontrado.');
       // o WhatsApp identifica o cliente nos agendamentos do site: não pode repetir
       if (wa && db.prepare('SELECT 1 FROM clientes WHERE whatsapp = ? AND id <> ?').get(wa, id)) {
         throw new Erro(409, 'WHATSAPP_EM_USO', 'Já existe outro cliente com esse WhatsApp.');
       }
-      db.prepare('UPDATE clientes SET nome = ?, whatsapp = ? WHERE id = ?').run(nome, wa, id);
-      return json(res, 200, { id, nome, whatsapp: wa });
+      // sem telefone, o nome é o que identifica (o agendamento presencial reaproveita pelo nome)
+      if (!wa && db.prepare("SELECT 1 FROM clientes WHERE whatsapp = '' AND nome = ? COLLATE NOCASE AND id <> ?").get(nome, id)) {
+        throw new Erro(409, 'CLIENTE_EXISTE', 'Já existe um cliente sem telefone com esse nome.');
+      }
+      if (novo) {
+        const r = db.prepare('INSERT INTO clientes (nome, whatsapp, email, aniversario) VALUES (?, ?, ?, ?)').run(nome, wa, email, aniversario);
+        return json(res, 200, { id: Number(r.lastInsertRowid), nome, whatsapp: wa, email, aniversario });
+      }
+      db.prepare('UPDATE clientes SET nome = ?, whatsapp = ?, email = ?, aniversario = ? WHERE id = ?').run(nome, wa, email, aniversario, id);
+      return json(res, 200, { id, nome, whatsapp: wa, email, aniversario });
     }
     if (m === 'GET' && rota === 'admin/indicadores') return json(res, 200, resumoCaixa());
     if (m === 'GET' && rota === 'admin/alertas') {
