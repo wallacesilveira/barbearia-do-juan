@@ -29,15 +29,7 @@
     t.textContent = msg; t.className = 'toast' + (ok ? ' ok' : ''); t.hidden = false;
     clearTimeout(toast.t); toast.t = setTimeout(() => { t.hidden = true; }, 6000);
   }
-  function mascara(v) {
-    let d = v.replace(/\D/g, '');
-    if (d.length > 11 && d.startsWith('55')) d = d.slice(2);
-    d = d.slice(0, 11);
-    if (d.length <= 2) return d ? '(' + d : '';
-    const ddd = '(' + d.slice(0, 2) + ') ';
-    if (d[2] === '9') return ddd + '9' + (d.length > 3 ? ' ' + d.slice(3, 7) : '') + (d.length > 7 ? '-' + d.slice(7) : '');
-    return ddd + d.slice(2, 6) + (d.length > 6 ? '-' + d.slice(6) : '');
-  }
+  const mascara = (v) => BJ.tel(v); // (11)98765-4321 — mesma máscara do painel
   const whatsValido = (d) => (d.length === 11 && d[2] === '9' && d[0] !== '0') || (d.length === 10 && d[0] !== '0');
 
   /* ------------------------------------------------------------ navegação */
@@ -192,7 +184,7 @@
           <input id="nome" name="nome" type="text" autocomplete="name" placeholder="Digite seu nome e sobrenome" maxlength="80" value="${esc(S.nome)}" required ${e.nome ? 'aria-invalid="true" aria-describedby="e-nome"' : ''}>
           <span class="erro" id="e-nome">${esc(e.nome || '')}</span></div>
         <div class="campo"><label for="whats">WhatsApp</label>
-          <input id="whats" name="whats" type="tel" inputmode="tel" autocomplete="tel-national" placeholder="(11) 9 9999-9999" maxlength="16" value="${esc(S.whats)}" required ${e.whats ? 'aria-invalid="true" aria-describedby="e-whats"' : ''}>
+          <input id="whats" name="whats" type="tel" inputmode="tel" autocomplete="tel-national" data-mascara="tel" placeholder="(11)98765-4321" value="${esc(S.whats)}" required ${e.whats ? 'aria-invalid="true" aria-describedby="e-whats"' : ''}>
           <span class="erro" id="e-whats">${esc(e.whats || '')}</span></div>
         <p class="privacidade">Seus dados ficam guardados apenas junto ao seu agendamento.</p>
       </form>`;
@@ -317,7 +309,7 @@ Até lá!`;
   function erroWhats(v) {
     const d = v.replace(/\D/g, '');
     if (!d) return 'Digite seu WhatsApp.';
-    if (d.length < 10) return 'Faltam números. Inclua o DDD: (11) 9 9999-9999.';
+    if (d.length < 10) return 'Faltam números. Inclua o DDD: (11)98765-4321.';
     if (!whatsValido(d)) return 'Confira o número: celular tem 11 dígitos com DDD e começa com 9.';
     return '';
   }

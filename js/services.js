@@ -65,6 +65,7 @@
     logado() { return !!guardar.get(); },
     carregarAdmin() { return this._get('admin/site'); },
     clientes() { return this._get('admin/clientes'); },
+    salvarCliente(id, nome, whatsapp) { return this._post('admin/cliente', { id, nome, whatsapp }); },
     caixa() { return this._get('admin/indicadores'); },
     alertas() { return this._get('admin/alertas'); },
     marcarAlertasLidos(ids) { return this._post('admin/alertas/lidos', { ids: ids || [] }); },
@@ -181,6 +182,15 @@
       const r = await this._rpc('clientes_resumo', {});
       return { ...r, clientes: r.clientes.map((c) => ({ ...c, total_gasto: Number(c.total_gasto) })) };
     },
+    async salvarCliente(id, nome, whatsapp) {
+      let wa = String(whatsapp || '').replace(/\D/g, '');
+      if (wa.length > 11 && wa.startsWith('55')) wa = wa.slice(2);
+      nome = window.BJ.nome(nome);
+      if (!nome || nome.length > 80 || (wa && wa.length !== 10 && wa.length !== 11)) throw new ApiError(400, 'DADOS_INVALIDOS', 'Confira o nome e o WhatsApp (DDD + número).');
+      if (wa && (await this._rest(`clientes?select=id&whatsapp=eq.${wa}&id=neq.${Number(id)}`)).length) throw new ApiError(409, 'WHATSAPP_EM_USO', 'Já existe outro cliente com esse WhatsApp.');
+      const r = await this._rest('clientes?id=eq.' + Number(id), { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ nome, whatsapp: wa }) });
+      return r[0];
+    },
     async alertas() {
       const [alertas, naoLidos] = await Promise.all([
         this._rest('alertas?select=*,agendamentos(codigo,data,inicio_min)&order=id.desc&limit=50'),
@@ -238,6 +248,11 @@
   };
 
   window.Api = usaSupabase ? Supa : Local;
+
+  // Todo campo com data-mascara="tel" recebe a máscara de telefone enquanto se digita (fase de captura: roda antes dos outros ouvintes).
+  document.addEventListener('input', (e) => {
+    if (e.target.matches && e.target.matches('input[data-mascara="tel"]')) e.target.value = window.BJ.tel(e.target.value);
+  }, true);
   window.ApiError = ApiError;
 
   /* --------------------------------------------------------------- helpers */
@@ -254,6 +269,23 @@
           return parte ? parte.charAt(0).toLocaleUpperCase('pt-BR') + parte.slice(1).toLocaleLowerCase('pt-BR') : parte;
         }).join('');
       }).join(' ');
+    },
+    /** Máscara de telefone: (11)98765-4321 (celular) ou (11)3456-7890 (fixo). Remove o 55 do início se vier junto. */
+    tel(v) {
+      let d = String(v ?? '').replace(/\D/g, '');
+      if (d.length > 11 && d.startsWith('55')) d = d.slice(2);
+      d = d.slice(0, 11);
+      if (!d) return '';
+      if (d.length <= 2) return '(' + d;
+      const n = d[2] === '9' ? 5 : 4; // celular começa com 9 depois do DDD
+      const fim = d.slice(2 + n);
+      return '(' + d.slice(0, 2) + ')' + d.slice(2, 2 + n) + (fim ? '-' + fim : '');
+    },
+    /** Exibição: aplica a máscara só a números válidos (10/11 dígitos); números fora do padrão aparecem como estão, para serem corrigidos. */
+    telExibir(v) {
+      let d = String(v ?? '').replace(/\D/g, '');
+      if (d.length > 11 && d.startsWith('55')) d = d.slice(2);
+      return d.length === 10 || d.length === 11 ? BJ.tel(d) : d;
     },
     /** Aceita só caminhos relativos do site ou data:image/. Bloqueia javascript: e outros esquemas. */
     src(u) {

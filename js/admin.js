@@ -29,12 +29,9 @@
   const fmtNum = (v) => (v == null ? '' : String(v).replace('.', ','));
   const digitos = (s) => String(s || '').replace(/\D/g, '');
   const centavos = (v) => Math.round(Number(v || 0) * 100) / 100;
-  function fmtTel(s) {
-    let d = digitos(s); if (d.length > 11 && d.startsWith('55')) d = d.slice(2);
-    if (d.length === 11) return `(${d.slice(0, 2)}) ${d[2]} ${d.slice(3, 7)}-${d.slice(7)}`;
-    if (d.length === 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
-    return s;
-  }
+  const fmtTel = (s) => BJ.telExibir(s);
+  const telValido = (d) => d.length === 10 || d.length === 11;
+  const CAMPO_TEL = 'type="tel" inputmode="tel" data-mascara="tel" placeholder="(11)98765-4321" autocomplete="off"';
   const waCliente = (s) => { let d = digitos(s); if (d.length <= 11) d = '55' + d; return 'https://wa.me/' + d; };
   const pick = (o, cols) => Object.fromEntries(cols.filter((c) => c in o).map((c) => [c, o[c]]));
   const iniciais = (nome) => String(nome || '').trim().split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]).join('').toUpperCase() || '?';
@@ -531,7 +528,7 @@
       titulo: 'Novo agendamento',
       corpo: `<p class="sub">Para clientes que marcam pelo telefone ou chegam sem horário. Sobrenome e telefone são opcionais.</p>
         <div class="grade2"><div class="campo"><label for="admin-ag-nome">Nome do cliente</label><input id="admin-ag-nome" maxlength="80" list="admin-ag-clientes" autocomplete="off" required><datalist id="admin-ag-clientes"></datalist></div>
-          <div class="campo"><label for="admin-ag-whats">WhatsApp <span class="opcional">opcional</span></label><input id="admin-ag-whats" type="tel" inputmode="tel" placeholder="(11) 9 9999-9999" maxlength="16"></div></div>
+          <div class="campo"><label for="admin-ag-whats">WhatsApp <span class="opcional">opcional</span></label><input id="admin-ag-whats" ${CAMPO_TEL}></div></div>
         <fieldset class="campo"><legend class="rotulo">Serviços</legend><div class="chips">${servicos.map((s) => `<label class="chip"><input type="checkbox" name="admin-ag-servico" value="${s.id}"><span>${esc(s.nome)}<small>${esc(brl(s.preco))}</small></span></label>`).join('')}</div></fieldset>
         <div class="campo"><label for="admin-ag-data">Data</label><input id="admin-ag-data" type="date" value="${esc(dataInicial || hojeIso())}" required></div>
         <fieldset class="campo"><legend class="rotulo">Horário</legend><div id="admin-ag-slots" class="slots-adm-area"></div></fieldset>
@@ -622,7 +619,7 @@
         const data = $('#admin-ag-data').value;
         const servico_ids = $$('input[name="admin-ag-servico"]:checked').map((el) => Number(el.value));
         if (!nome) { $('#admin-ag-nome').focus(); return toast('Informe o nome do cliente.', false); }
-        if (whatsapp && (whatsapp.length < 10 || whatsapp.length > 13)) return toast('Confira o WhatsApp (com DDD) ou deixe o campo vazio.', false);
+        if (whatsapp && !telValido(whatsapp)) return toast('Confira o WhatsApp: DDD + número, ex.: (11)98765-4321. Ou deixe o campo vazio.', false);
         if (!servico_ids.length) return toast('Selecione pelo menos um serviço.', false);
         if (!data || inicioSel == null) return toast('Escolha a data e um horário livre.', false);
         const r = await seguro(() => Api.agendarAdmin({ data, inicio_min: inicioSel, servico_ids, nome, whatsapp }));
@@ -882,7 +879,7 @@
             <span role="cell" data-rot="Total">${A.fmtBRL(x.total_gasto)}</span>
             <span role="cell" data-rot="Última visita">${x.ultima_visita ? A.fmtData(x.ultima_visita) : '—'}</span>
             <span role="cell" data-rot="Próxima">${x.proxima_visita ? A.fmtData(x.proxima_visita) : '—'}</span>
-            <span role="cell" class="tabela__acao">${digitos(x.whatsapp).length >= 10 ? `<a class="icone" href="${esc(waCliente(x.whatsapp))}" target="_blank" rel="noopener" aria-label="WhatsApp de ${esc(x.nome)}">${BJIcons.svg('whatsapp')}</a>` : ''}</span>
+            <span role="cell" class="tabela__acao"><button type="button" class="icone icone--editar" data-editar-cli="${x.id}" aria-label="Editar contato de ${esc(x.nome)}">${BJIcons.svg('edit')}</button>${telValido(digitos(x.whatsapp)) ? `<a class="icone" href="${esc(waCliente(x.whatsapp))}" target="_blank" rel="noopener" aria-label="WhatsApp de ${esc(x.nome)}">${BJIcons.svg('whatsapp')}</a>` : ''}</span>
           </div>`).join('')}</div>
           ${filtrados.length > vis.length ? `<div class="mais"><button type="button" class="btn btn--sm btn--sec" data-mais>Mostrar mais (${filtrados.length - vis.length})</button></div>` : ''}`
         : vazio('users', q ? 'Nenhum cliente encontrado' : 'Nenhum cliente ainda', q ? 'Tente outro nome ou telefone.' : 'Os clientes são cadastrados automaticamente ao agendar.');
@@ -890,7 +887,34 @@
     lista();
     c.oninput = (e) => { if (e.target.id === 'cli-busca') { S.buscaCli = e.target.value; S.limiteCli = 30; lista(); } };
     c.onchange = (e) => { if (e.target.id === 'cli-ordem') { S.ordemCli = e.target.value; lista(); } };
-    c.onclick = (e) => { if (e.target.closest('[data-mais]')) { S.limiteCli += 30; lista(); } };
+    c.onclick = (e) => {
+      if (e.target.closest('[data-mais]')) { S.limiteCli += 30; lista(); return; }
+      const ed = e.target.closest('[data-editar-cli]');
+      if (ed) formCliente(clientes.find((x) => String(x.id) === ed.dataset.editarCli), refazer);
+    };
+  }
+
+  function formCliente(cli, aoSalvar) {
+    const atual = digitos(cli.whatsapp);
+    const foraDoPadrao = atual && !telValido(atual.length > 11 && atual.startsWith('55') ? atual.slice(2) : atual);
+    abrirModal({
+      titulo: 'Editar contato',
+      corpo: `<div class="det-cab"><span class="avatar">${esc(iniciais(cli.nome))}</span><div class="det-cab__txt"><strong>${esc(cli.nome)}</strong>
+          <span>${plural(cli.visitas, 'visita', 'visitas')}${cli.ultima_visita ? ' · última em ' + A.fmtData(cli.ultima_visita) : ''}</span></div></div>
+        <div class="campo"><label for="cli-nome">Nome</label><input id="cli-nome" maxlength="80" autocomplete="off" value="${esc(cli.nome)}" required></div>
+        <div class="campo"><label for="cli-whats">WhatsApp <span class="opcional">opcional</span></label><input id="cli-whats" ${CAMPO_TEL} value="${esc(foraDoPadrao ? atual : BJ.tel(atual))}">
+          ${foraDoPadrao ? `<small class="aviso-campo">O número salvo (${esc(atual)}) está fora do padrão. Confira e corrija.</small>` : '<small>DDD + número. Deixe vazio se o cliente não tiver.</small>'}</div>`,
+      rodape: '<button type="button" class="btn" data-fechar>Cancelar</button><button type="submit" class="btn btn--solid">Salvar contato</button>',
+      aberto() { const i = $('#cli-whats'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); },
+      async enviar() {
+        const nome = BJ.nome($('#cli-nome').value);
+        const whatsapp = digitos($('#cli-whats').value);
+        if (!nome) { $('#cli-nome').focus(); return toast('Informe o nome do cliente.', false); }
+        if (whatsapp && !telValido(whatsapp)) { $('#cli-whats').focus(); return toast('WhatsApp incompleto: use DDD + número, ex.: (11)98765-4321.', false); }
+        const ok = await seguro(() => Api.salvarCliente(cli.id, nome, whatsapp).then(() => true));
+        if (ok) { fecharModal(); toast('Contato atualizado.'); aoSalvar(); }
+      },
+    });
   }
 
   /* ============================================================ Serviços */
@@ -1241,8 +1265,8 @@
         <div class="campo"><label for="k-st">Título da seção Sobre</label><input id="k-st" value="${v('sobre_titulo')}" maxlength="100"></div>
         <div class="campo"><label for="k-sx">Texto da seção Sobre</label><textarea id="k-sx" maxlength="500">${v('sobre_texto')}</textarea></div></div>
       <div class="cartao cartao__pad"><h2>Contato</h2>
-        <div class="grade2"><div class="campo"><label for="k-tel">Telefone (exibição)</label><input id="k-tel" value="${v('telefone')}" placeholder="(11) 98811-8988"></div>
-          <div class="campo"><label for="k-wa">WhatsApp (com DDI)</label><input id="k-wa" inputmode="numeric" value="${v('whatsapp')}" placeholder="5511988118988"><small>Só números. Ex.: 55 + DDD + número.</small></div></div>
+        <div class="grade2"><div class="campo"><label for="k-tel">Telefone (exibido no site)</label><input id="k-tel" ${CAMPO_TEL} value="${esc(BJ.tel(g.telefone))}"></div>
+          <div class="campo"><label for="k-wa">WhatsApp da barbearia</label><input id="k-wa" ${CAMPO_TEL} value="${esc(BJ.tel(g.whatsapp))}"><small>DDD + número. O código do Brasil (55) é incluído automaticamente.</small></div></div>
         <div class="campo"><label for="k-end">Endereço</label><input id="k-end" value="${v('endereco')}" maxlength="120"></div>
         <div class="grade2"><div class="campo"><label for="k-ig">Instagram</label><input id="k-ig" value="${v('instagram')}" placeholder="@barbeariadojuan_"></div>
           <div class="campo"><label for="k-igu">Link do Instagram</label><input id="k-igu" type="url" value="${v('instagram_url')}" placeholder="https://www.instagram.com/…"></div></div>
@@ -1257,9 +1281,11 @@
     ligarUpload('k-sf', { max: 1200 }, (u) => { novas.sobre_foto = u; });
     c.onsubmit = async (e) => {
       e.preventDefault();
-      let wa = digitos($('#k-wa').value);
-      if (wa.length >= 10 && wa.length <= 11) wa = '55' + wa;
-      if (wa.length < 12 || wa.length > 13) return toast('WhatsApp inválido. Use DDI + DDD + número (ex.: 5511988118988).', false);
+      const waLocal = digitos($('#k-wa').value);
+      if (!telValido(waLocal)) { $('#k-wa').focus(); return toast('WhatsApp inválido: use DDD + número, ex.: (11)98811-8988.', false); }
+      const wa = '55' + waLocal;
+      const tel = digitos($('#k-tel').value);
+      if (tel && !telValido(tel)) { $('#k-tel').focus(); return toast('Telefone incompleto: use DDD + número, ex.: (11)98811-8988.', false); }
       let ig = $('#k-ig').value.trim(); if (ig && !ig.startsWith('@')) ig = '@' + ig;
       let igu = $('#k-igu').value.trim();
       if (!igu && ig) igu = `https://www.instagram.com/${ig.slice(1)}/`;
@@ -1268,7 +1294,7 @@
       const obj = {
         nome: $('#k-nome').value.trim(), slogan: $('#k-slogan').value.trim(), desde: $('#k-desde').value, servicos_subtitulo: $('#k-sub').value.trim(),
         hero_texto: $('#k-hero').value.trim(), sobre_titulo: $('#k-st').value.trim(), sobre_texto: $('#k-sx').value.trim(),
-        telefone: $('#k-tel').value.trim(), whatsapp: wa, endereco: $('#k-end').value.trim(), instagram: ig, instagram_url: igu, whatsapp_msg: $('#k-wam').value.trim(), ...novas,
+        telefone: BJ.tel(tel), whatsapp: wa, endereco: $('#k-end').value.trim(), instagram: ig, instagram_url: igu, whatsapp_msg: $('#k-wam').value.trim(), ...novas,
       };
       const btn = $('button[type="submit"]', c); btn.disabled = true;
       const ok = await seguro(() => Api.salvarConfig(obj).then(() => true), 'Não foi possível salvar.');

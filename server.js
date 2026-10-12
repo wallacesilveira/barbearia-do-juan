@@ -439,10 +439,11 @@ function criarAgendamento(b) {
 
 function criarAgendamentoAdmin(b) {
   const nome = padronizarNome(b.nome);
-  const wa = DIGITOS(b.whatsapp);
+  let wa = DIGITOS(b.whatsapp);
+  if (wa.length > 11 && wa.startsWith('55')) wa = wa.slice(2);
   const data = String(b.data || '');
   const inicioMin = Number(b.inicio_min);
-  if (!nome || nome.length > 80 || (wa && (wa.length < 10 || wa.length > 13))
+  if (!nome || nome.length > 80 || (wa && wa.length !== 10 && wa.length !== 11)
       || !/^\d{4}-\d{2}-\d{2}$/.test(data) || !Number.isInteger(inicioMin)) {
     return { ok: false, erro: 'DADOS_INVALIDOS' };
   }
@@ -609,6 +610,23 @@ async function api(req, res, url) {
     if (m === 'POST' && rota === 'admin/logout') { sessoes.delete((req.headers.authorization || '').replace(/^Bearer /, '')); return json(res, 200, { ok: true }); }
     if (m === 'GET' && rota === 'admin/site') return json(res, 200, siteData(true));
     if (m === 'GET' && rota === 'admin/clientes') return json(res, 200, clientesResumo());
+    if (m === 'POST' && rota === 'admin/cliente') {
+      const b = await lerCorpo(req);
+      const id = Number(b.id);
+      const nome = padronizarNome(b.nome);
+      let wa = DIGITOS(b.whatsapp);
+      if (wa.length > 11 && wa.startsWith('55')) wa = wa.slice(2);
+      if (!Number.isInteger(id) || id < 1 || !nome || nome.length > 80 || (wa && wa.length !== 10 && wa.length !== 11)) {
+        throw new Erro(400, 'DADOS_INVALIDOS', 'Confira o nome e o WhatsApp (DDD + número).');
+      }
+      if (!db.prepare('SELECT 1 FROM clientes WHERE id = ?').get(id)) throw new Erro(404, 'CLIENTE_NAO_ENCONTRADO', 'Cliente não encontrado.');
+      // o WhatsApp identifica o cliente nos agendamentos do site: não pode repetir
+      if (wa && db.prepare('SELECT 1 FROM clientes WHERE whatsapp = ? AND id <> ?').get(wa, id)) {
+        throw new Erro(409, 'WHATSAPP_EM_USO', 'Já existe outro cliente com esse WhatsApp.');
+      }
+      db.prepare('UPDATE clientes SET nome = ?, whatsapp = ? WHERE id = ?').run(nome, wa, id);
+      return json(res, 200, { id, nome, whatsapp: wa });
+    }
     if (m === 'GET' && rota === 'admin/indicadores') return json(res, 200, resumoCaixa());
     if (m === 'GET' && rota === 'admin/alertas') {
       const limite = Math.min(200, Math.max(1, Number(url.searchParams.get('limite')) || 50));

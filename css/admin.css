@@ -359,13 +359,14 @@ a.aviso-barra:hover { border-color: var(--gold); }
 .busca input { width: 220px; min-height: 42px; border: 0; background: none; outline: none; color: var(--text); font-size: 14px; }
 .ferramentas select { min-height: 40px; padding: 0 10px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg-2); font-size: 13.5px; }
 .tabela { display: flex; flex-direction: column; }
-.tabela__cab, .tabela__linha { display: grid; grid-template-columns: minmax(0, 2.4fr) 1fr 1fr 1.1fr 1.1fr 48px; align-items: center; gap: 12px; padding: 10px 20px; }
+.tabela__cab, .tabela__linha { display: grid; grid-template-columns: minmax(0, 2.4fr) 1fr 1fr 1.1fr 1.1fr 88px; align-items: center; gap: 12px; padding: 10px 20px; }
 .tabela__cab { color: var(--dim); font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; border-bottom: 1px solid var(--line); }
 .tabela__linha { border-bottom: 1px solid var(--line); font-size: 14px; font-variant-numeric: tabular-nums; }
 .tabela__linha:last-child { border-bottom: 0; }
 .tabela__linha:hover { background: var(--surface-2); }
-.tabela__acao { display: flex; justify-content: flex-end; }
+.tabela__acao { display: flex; justify-content: flex-end; gap: 6px; }
 .tabela__acao .icone { width: 40px; height: 40px; color: var(--ok); }
+.tabela__acao .icone--editar { color: var(--text-2); }
 .cli { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .cli > span:last-child { display: flex; flex-direction: column; min-width: 0; }
 .cli b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -475,7 +476,7 @@ a.aviso-barra:hover { border-color: var(--gold); }
   .tabela__cab { display: none; }
   .tabela__linha { grid-template-columns: repeat(4, minmax(0, 1fr)) 40px; grid-template-areas: "cli cli cli cli acao" "a b c d acao"; row-gap: 8px; padding: 14px 20px; }
   .tabela__linha > .cli { grid-area: cli; }
-  .tabela__linha > .tabela__acao { grid-area: acao; }
+  .tabela__linha > .tabela__acao { grid-area: acao; flex-direction: column; align-self: start; }
   .tabela__linha > [data-rot] { font-size: 13.5px; }
   .tabela__linha > [data-rot]::before { content: attr(data-rot); display: block; color: var(--dim); font-size: 11px; }
   .tabela__linha > [data-rot] .pill { margin-left: 6px; }
