@@ -12,15 +12,18 @@
 
   /* ---- menu mobile */
   const menu = $('#menu'), btn = $('#menu-btn');
-  const fechar = () => { menu.classList.remove('open'); btn.setAttribute('aria-expanded', 'false'); btn.setAttribute('aria-label', 'Abrir menu'); };
-  btn.addEventListener('click', () => {
-    const abrir = !menu.classList.contains('open');
+  const alternar = (abrir) => {
     menu.classList.toggle('open', abrir);
     btn.setAttribute('aria-expanded', String(abrir));
     btn.setAttribute('aria-label', abrir ? 'Fechar menu' : 'Abrir menu');
-  });
+    btn.innerHTML = BJIcons.svg(abrir ? 'close' : 'menu');
+  };
+  const fechar = () => { if (menu.classList.contains('open')) alternar(false); };
+  btn.addEventListener('click', () => alternar(!menu.classList.contains('open')));
   menu.addEventListener('click', (e) => { if (e.target.closest('a')) fechar(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') fechar(); });
+  $('#menu-veu').addEventListener('click', fechar); // toque fora do menu fecha
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && menu.classList.contains('open')) { fechar(); btn.focus(); } });
+  matchMedia('(min-width: 861px)').addEventListener('change', (e) => { if (e.matches) fechar(); });
 
   /* ---- item de menu ativo conforme a rolagem */
   const links = [...menu.querySelectorAll('a')];

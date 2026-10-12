@@ -164,26 +164,23 @@
   }
 
   function telaHorario() {
-    const p = preco();
     let corpo;
-    let cruzaAlmoco = false;
+    const al = A.almoco(S.site.config);
     if (S.carregandoHorarios) {
       corpo = `<div class="slots skel" aria-busy="true">${'<button class="slot" disabled></button>'.repeat(9)}</div>`;
     } else if (S.erroHorarios) {
       corpo = `<div class="vazio-msg">Não foi possível carregar os horários.<br><button class="btn btn--sm" style="margin-top:12px" data-acao="recarregar">Tentar novamente</button></div>`;
     } else {
-      const slots = A.gerarHorarios(ctxHorario());
-      const livres = slots.filter((s) => s.livre).length;
-      cruzaAlmoco = slots.some((s) => s.motivo === 'ALMOCO');
-      corpo = livres
-        ? `<div class="slots" role="group" aria-label="Horários">${slots.map((s) => `<button type="button" class="slot" data-h="${s.inicio_min}" ${s.livre ? '' : 'disabled aria-label="' + A.fmtMin(s.inicio_min) + ', indisponível"'} aria-pressed="${S.inicio === s.inicio_min}">${A.fmtMin(s.inicio_min)}</button>`).join('')}</div>`
+      // Livres + horários ocupados (almoço, bloqueio ou cliente) aparecem; os que só "não cabem" ficam ocultos.
+      const ocupados = [...(al ? [al] : []), ...S.ocupados.map((o) => ({ ini: Number(o.ini), fim: Number(o.fim) }))];
+      const ocupado = (t) => ocupados.some((o) => o.ini <= t && t < o.fim);
+      const slots = A.gerarHorarios(ctxHorario()).filter((s) => s.livre || (s.motivo !== 'PASSADO' && ocupado(s.inicio_min)));
+      corpo = slots.some((s) => s.livre)
+        ? `<div class="slots" role="group" aria-label="Horários">${slots.map((s) => `<button type="button" class="slot" data-h="${s.inicio_min}" ${s.livre ? '' : `disabled aria-label="${A.fmtMin(s.inicio_min)}, indisponível"`} aria-pressed="${S.inicio === s.inicio_min}">${A.fmtMin(s.inicio_min)}</button>`).join('')}</div>`
         : '<div class="vazio-msg">Não há horários disponíveis nesta data para os serviços escolhidos.<br>Escolha outra data.</div>';
     }
-    const al = A.almoco(S.site.config);
     $('#tela').innerHTML = `<h1 tabindex="-1">Horários disponíveis</h1>
-      <div class="data-linha">${BJIcons.svg('calendar')}<span>${dataLonga(S.data)}</span></div>${corpo}
-      ${al ? `<p class="nota">${BJIcons.svg('clock')}Horário de almoço: ${A.fmtMin(al.ini)} às ${A.fmtMin(al.fim)}</p>` : ''}
-      ${al && cruzaAlmoco ? `<p class="nota">${BJIcons.svg('info')}Alguns horários ficam indisponíveis por causa do intervalo de almoço.</p>` : ''}`;
+      <div class="data-linha">${BJIcons.svg('calendar')}<span>${dataLonga(S.data)}</span></div>${corpo}`;
     rodape(`<button class="btn btn--solid" data-acao="continuar" ${S.inicio != null ? '' : 'disabled'}>Continuar</button>`);
   }
 
