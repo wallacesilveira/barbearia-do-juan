@@ -136,7 +136,9 @@
   }
   const fecharModal = () => { if (modal.open) modal.close(); };
   $('#modal-x').addEventListener('click', fecharModal);
-  modal.addEventListener('click', (e) => { if (e.target === modal || e.target.closest('[data-fechar]')) fecharModal(); });
+  // só fecha pelos botões: toque fora não fecha, e Esc/voltar do Android não descartam um formulário em preenchimento
+  modal.addEventListener('click', (e) => { if (e.target.closest('[data-fechar]')) fecharModal(); });
+  modal.addEventListener('cancel', (e) => { if ($('input, select, textarea', modal)) e.preventDefault(); });
   $('#modal-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!aoEnviar) return;
@@ -156,7 +158,7 @@
         <div class="modal__rodape"><button type="button" class="btn" data-r="0">Voltar</button><button type="button" class="btn ${perigo ? 'btn--perigo' : 'btn--solid'}" data-r="1">${esc(rotulo)}</button></div></div>`;
       document.body.appendChild(d);
       const fim = (v) => { d.close(); d.remove(); ok(v); };
-      d.addEventListener('click', (e) => { const b = e.target.closest('[data-r]'); if (b) fim(b.dataset.r === '1'); else if (e.target === d) fim(false); });
+      d.addEventListener('click', (e) => { const b = e.target.closest('[data-r]'); if (b) fim(b.dataset.r === '1'); });
       d.addEventListener('cancel', (e) => { e.preventDefault(); fim(false); });
       d.showModal();
       $('[data-r="0"]', d).focus();

@@ -222,24 +222,35 @@
     const tot = a.valor_consulta ? (Number(a.valor_total) ? A.fmtBRL(a.valor_total) + ' + a consultar' : 'A consultar') : A.fmtBRL(a.valor_total);
     // linhas iguais às da confirmação (mesma regra de combo); o total exibido vem do servidor
     const linhas = preco().linhas.map((l) => ({ nome: l.tipo === 'combo' ? l.nome + ' (combo)' : l.nome, preco: l.preco }));
-    const html = blocoResumo({ data: a.data, inicio: a.inicio_min, dur: a.duracao_min, linhas, total: tot, cliente: a.cliente });
+    const [y, m, d] = a.data.split('-').map(Number);
+    const dia = new Date(y, m - 1, d);
+    const semana = dia.toLocaleDateString('pt-BR', { weekday: 'long' });
+    const end = S.site.config.endereco;
     $('#tela').innerHTML = `<div class="sucesso">
-      <div class="selo">${BJIcons.svg('check-circle')}</div>
-      <h1 tabindex="-1">Agendamento confirmado!</h1>
-      <div class="codigo" aria-label="Código do agendamento">${esc(a.codigo)}</div>
-      ${html}
+      <div class="selo">${BJIcons.svg('check')}</div>
+      <h1 tabindex="-1">Horário confirmado!</h1>
+      <p class="sub">Te esperamos, ${esc(String(a.cliente.nome).split(' ')[0])}.</p>
+      <div class="ticket">
+        <div class="ticket__quando">
+          <div class="ticket__data"><span>${esc(semana.charAt(0).toUpperCase() + semana.slice(1))}</span><strong>${esc(dia.toLocaleDateString('pt-BR', { day: 'numeric', month: 'long' }))}</strong></div>
+          <div class="ticket__hora"><strong>${A.fmtMin(a.inicio_min)}</strong><span>até ${A.fmtMin(a.fim_min)}</span></div>
+        </div>
+        <ul class="ticket__itens">${linhas.map((l) => `<li><span>${esc(l.nome)}</span><span>${l.preco == null ? 'Sob consulta' : A.fmtBRL(l.preco)}</span></li>`).join('')}
+          <li class="ticket__total"><span>Total</span><span>${esc(tot)}</span></li></ul>
+        ${end ? `<a class="ticket__local" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(end)}" target="_blank" rel="noopener">${BJIcons.svg('pin')}<span>${esc(end)}</span>${BJIcons.svg('right')}</a>` : ''}
+      </div>
       <div class="acoes">
-        <button class="btn btn--solid" data-acao="ics">${BJIcons.svg('calendar')}Adicionar ao calendário</button>
-        <a class="btn" href="${esc(waPosAgendamento(a))}" target="_blank" rel="noopener">${BJIcons.svg('whatsapp')}Falar pelo WhatsApp</a>
-        <button class="link" data-acao="novo">Fazer novo agendamento</button>
-      </div></div>`;
+        <button class="btn btn--solid" data-acao="ics">${BJIcons.svg('calendar')}Salvar na agenda</button>
+        <a class="btn" href="${esc(waPosAgendamento(a))}" target="_blank" rel="noopener">${BJIcons.svg('whatsapp')}WhatsApp</a>
+      </div>
+      <button class="link" data-acao="novo">Fazer novo agendamento</button>
+    </div>`;
     rodape(null);
   }
 
   function waPosAgendamento(a) {
     const msg = `Olá! Acabei de agendar pelo site da ${S.site.config.nome || 'Barbearia do Juan'}. Seguem os dados do meu agendamento:
 
-*Código:* ${a.codigo}
 *Data:* ${A.fmtData(a.data)}
 *Horário:* ${A.fmtMin(a.inicio_min)}
 *Serviços:* ${a.servicos.map((s) => s.nome).join(', ')}
@@ -260,11 +271,11 @@ Até lá!`;
     const ics = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Barbearia do Juan//Agendamento//PT-BR', 'CALSCALE:GREGORIAN', 'BEGIN:VEVENT',
       `UID:${a.codigo}@barbeariadojuan`, `DTSTAMP:${stamp}`, `DTSTART;TZID=America/Sao_Paulo:${d}T${t(a.inicio_min)}`, `DTEND;TZID=America/Sao_Paulo:${d}T${t(a.fim_min)}`,
       `SUMMARY:${txt(nome + ' — ' + a.servicos.map((s) => s.nome).join(' + '))}`, `LOCATION:${txt(S.site.config.endereco || '')}`,
-      `DESCRIPTION:${txt('Código do agendamento: ' + a.codigo + '\nValor: ' + (a.valor_consulta ? 'a consultar' : A.fmtBRL(a.valor_total)))}`,
+      `DESCRIPTION:${txt('Valor: ' + (a.valor_consulta ? 'a consultar' : A.fmtBRL(a.valor_total)))}`,
       'BEGIN:VALARM', 'TRIGGER:-PT1H', 'ACTION:DISPLAY', 'DESCRIPTION:Seu horário na barbearia é daqui a 1 hora', 'END:VALARM', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n');
     const url = URL.createObjectURL(new Blob([ics], { type: 'text/calendar;charset=utf-8' }));
     const l = document.createElement('a');
-    l.href = url; l.download = 'agendamento-' + a.codigo + '.ics';
+    l.href = url; l.download = 'barbearia-' + a.data + '.ics';
     document.body.appendChild(l); l.click(); l.remove();
     setTimeout(() => URL.revokeObjectURL(url), 2000);
   }

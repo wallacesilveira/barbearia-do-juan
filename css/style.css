@@ -30,6 +30,8 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; scroll-padding-top: calc(var(--header-h) + 8px); }
+/* nada pode alargar a página: no celular isso faz a tela "andar" para o lado ao arrastar o dedo */
+html, body { overflow-x: clip; }
 body {
   margin: 0; background: var(--bg); color: var(--text); font: 400 15px/1.55 var(--font);
   -webkit-font-smoothing: antialiased; min-height: 100vh;
@@ -238,6 +240,10 @@ ul { margin: 0; padding: 0; list-style: none; }
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
   .reveal { opacity: 1; transform: none; }
+}
+/* em telas de toque, campo com letra menor que 16px faz o iPhone dar zoom ao tocar e não voltar sozinho */
+@media (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="file"]), select, textarea { font-size: 16px !important; }
 }
 
 /* ============================================================ responsivo */
