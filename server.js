@@ -100,6 +100,21 @@ CREATE TABLE IF NOT EXISTS agendamento_servicos (
   id INTEGER PRIMARY KEY AUTOINCREMENT, agendamento_id INTEGER NOT NULL REFERENCES agendamentos(id) ON DELETE CASCADE,
   servico_id INTEGER REFERENCES servicos(id) ON DELETE SET NULL, nome TEXT, duracao_min INTEGER, preco REAL);
 CREATE TABLE IF NOT EXISTS usuarios_admin (usuario TEXT PRIMARY KEY, senha_hash TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS vendas_avulsas (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL,
+  cliente_id INTEGER REFERENCES clientes(id) ON DELETE SET NULL, cliente_nome TEXT NOT NULL DEFAULT '',
+  valor_total REAL NOT NULL CHECK (valor_total >= 0),
+  forma TEXT NOT NULL CHECK (forma IN ('dinheiro','pix','cartao','outro')),
+  status TEXT NOT NULL DEFAULT 'ativa' CHECK (status IN ('ativa','cancelada')),
+  criado_em TEXT NOT NULL DEFAULT (datetime('now','localtime')), cancelada_em TEXT);
+CREATE TABLE IF NOT EXISTS vendas_avulsas_itens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  venda_id INTEGER NOT NULL REFERENCES vendas_avulsas(id) ON DELETE CASCADE,
+  produto_id INTEGER REFERENCES produtos(id) ON DELETE SET NULL,
+  nome TEXT NOT NULL, quantidade INTEGER NOT NULL CHECK (quantidade > 0),
+  preco_unitario REAL NOT NULL CHECK (preco_unitario >= 0), valor_total REAL NOT NULL CHECK (valor_total >= 0));
+CREATE INDEX IF NOT EXISTS idx_vendas_avulsas_data ON vendas_avulsas (data, status);
+CREATE INDEX IF NOT EXISTS idx_vendas_avulsas_itens ON vendas_avulsas_itens (venda_id, id);
 `);
 try {
   const cols = db.prepare('PRAGMA table_info(agendamentos)').all();
@@ -277,6 +292,10 @@ function resumoCaixa() {
     FROM agendamentos WHERE status = 'confirmado' AND data BETWEEN ? AND ?`);
   const porForma = db.prepare(`SELECT forma, SUM(valor) AS total FROM recebimentos_agendamento
     WHERE date(recebido_em) BETWEEN ? AND ? GROUP BY forma`);
+  const somaAvulsas = db.prepare(`SELECT COUNT(*) AS vendas, COALESCE(SUM(valor_total), 0) AS total
+    FROM vendas_avulsas WHERE status = 'ativa' AND data BETWEEN ? AND ?`);
+  const porFormaAvulsas = db.prepare(`SELECT forma, SUM(valor_total) AS total FROM vendas_avulsas
+    WHERE status = 'ativa' AND data BETWEEN ? AND ? GROUP BY forma`);
   const ranking = db.prepare(`
     SELECT s.nome, COUNT(*) AS quantidade, COALESCE(SUM(s.preco), 0) AS valor
     FROM agendamento_servicos s JOIN agendamentos a ON a.id = s.agendamento_id
@@ -288,17 +307,22 @@ function resumoCaixa() {
     const p = somaPeriodo.get(de, ate);
     const formas = { dinheiro: 0, pix: 0, cartao: 0, outro: 0 };
     porForma.all(de, ate).forEach((f) => { formas[f.forma] = centavos(f.total); });
-    const total = centavos(p.total);
+    // vendas avulsas (balcão, sem agendamento) entram como produtos e já estão pagas
+    const av = somaAvulsas.get(de, ate);
+    porFormaAvulsas.all(de, ate).forEach((f) => { formas[f.forma] = centavos(formas[f.forma] + Number(f.total)); });
+    const total = centavos(Number(p.total) + Number(av.total));
     out[k] = {
       de, ate,
       agendamentos: Number(p.agendamentos || 0),
       servicos: centavos(p.servicos),
-      produtos: centavos(p.produtos),
+      produtos: centavos(Number(p.produtos) + Number(av.total)),
+      vendas_avulsas: Number(av.vendas || 0),
+      valor_avulsas: centavos(av.total),
       adicionais: centavos(p.adicionais),
       descontos: centavos(p.descontos),
       total,
-      a_receber: centavos(Math.max(0, total - Number(p.pago || 0))),
-      ticket_medio: p.agendamentos ? centavos(total / p.agendamentos) : 0,
+      a_receber: centavos(Math.max(0, Number(p.total) - Number(p.pago || 0))),
+      ticket_medio: p.agendamentos ? centavos(p.total / p.agendamentos) : 0,
       recebido: centavos(Object.values(formas).reduce((s, v) => s + v, 0)),
       por_forma: formas,
       servicos_mais_vendidos: ranking.all(de, ate).map((s) => ({ nome: s.nome, quantidade: Number(s.quantidade), valor: centavos(s.valor) })),
@@ -306,10 +330,17 @@ function resumoCaixa() {
   }
   return out;
 }
+/** Dinheiro que entrou na gaveta no dia: pagamentos de comandas + vendas avulsas. */
+function dinheiroDoDia(data) {
+  const comandas = Number(db.prepare(`SELECT COALESCE(SUM(valor), 0) AS total
+    FROM recebimentos_agendamento WHERE forma = 'dinheiro' AND date(recebido_em) = ?`).get(data).total || 0);
+  const avulsas = Number(db.prepare(`SELECT COALESCE(SUM(valor_total), 0) AS total
+    FROM vendas_avulsas WHERE forma = 'dinheiro' AND status = 'ativa' AND data = ?`).get(data).total || 0);
+  return centavos(comandas + avulsas);
+}
 function resumoCaixaDiario(data) {
   const caixa = db.prepare('SELECT * FROM caixas_diarios WHERE data = ?').get(data);
-  const recebidoDinheiro = Number(db.prepare(`SELECT COALESCE(SUM(valor), 0) AS total
-    FROM recebimentos_agendamento WHERE forma = 'dinheiro' AND date(recebido_em) = ?`).get(data).total || 0);
+  const recebidoDinheiro = dinheiroDoDia(data);
   const valorAbertura = caixa ? Number(caixa.valor_abertura) : null;
   const valorEsperado = caixa ? Math.round((valorAbertura + recebidoDinheiro) * 100) / 100 : null;
   return {
@@ -324,6 +355,17 @@ function resumoCaixaDiario(data) {
     aberto_em: caixa ? caixa.aberto_em : null,
     fechado_em: caixa ? caixa.fechado_em : null,
   };
+}
+const FORMAS_PAGAMENTO = ['dinheiro', 'pix', 'cartao', 'outro'];
+function vendaAvulsa(id) {
+  const v = db.prepare('SELECT * FROM vendas_avulsas WHERE id = ?').get(id);
+  if (!v) return null;
+  const itens = db.prepare('SELECT produto_id, nome, quantidade, preco_unitario, valor_total FROM vendas_avulsas_itens WHERE venda_id = ? ORDER BY id').all(id)
+    .map((i) => ({ ...i, preco_unitario: Number(i.preco_unitario), valor_total: Number(i.valor_total) }));
+  return { ...v, valor_total: Number(v.valor_total), itens };
+}
+function listarVendasAvulsas(data) {
+  return db.prepare('SELECT id FROM vendas_avulsas WHERE data = ? ORDER BY id DESC').all(data).map((v) => vendaAvulsa(v.id));
 }
 /** Visita = agendamento confirmado cuja data já chegou. Cancelados e futuros não contam. */
 function clientesResumo() {
@@ -702,14 +744,87 @@ async function api(req, res, url) {
         const caixa = db.prepare('SELECT * FROM caixas_diarios WHERE data = ?').get(data);
         if (!caixa) throw new Erro(404, 'CAIXA_NAO_ABERTO', 'Abra o caixa antes de fechá-lo.');
         if (caixa.status !== 'aberto') throw new Erro(409, 'CAIXA_JA_FECHADO', 'Este caixa já foi fechado.');
-        const recebido = Number(db.prepare(`SELECT COALESCE(SUM(valor), 0) AS total
-          FROM recebimentos_agendamento WHERE forma = 'dinheiro' AND date(recebido_em) = ?`).get(data).total || 0);
+        const recebido = dinheiroDoDia(data);
         const esperado = Math.round((Number(caixa.valor_abertura) + recebido) * 100) / 100;
         const diferenca = Math.round((contado - esperado) * 100) / 100;
         db.prepare("UPDATE caixas_diarios SET valor_contado = ?, diferenca = ?, status = 'fechado', fechado_em = datetime('now','localtime') WHERE data = ?")
           .run(contado, diferenca, data);
         db.exec('COMMIT');
         return json(res, 200, resumoCaixaDiario(data));
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
+        throw e;
+      }
+    }
+    if (m === 'GET' && rota === 'admin/vendas-avulsas') {
+      const data = url.searchParams.get('data') || agoraSP().data;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) throw new Erro(400, 'DATA_INVALIDA');
+      return json(res, 200, listarVendasAvulsas(data));
+    }
+    if (m === 'POST' && rota === 'admin/venda-avulsa') {
+      const b = await lerCorpo(req);
+      const forma = String(b.forma || '');
+      const itens = (Array.isArray(b.itens) ? b.itens : []).map((i) => ({ produto_id: Number(i.produto_id), quantidade: Number(i.quantidade) }));
+      if (!FORMAS_PAGAMENTO.includes(forma) || !itens.length || itens.length > 50
+        || itens.some((i) => !Number.isInteger(i.produto_id) || i.produto_id < 1 || !Number.isInteger(i.quantidade) || i.quantidade < 1)) {
+        throw new Erro(400, 'DADOS_INVALIDOS', 'Escolha os produtos, as quantidades e a forma de pagamento.');
+      }
+      const clienteId = b.cliente_id == null || b.cliente_id === '' ? null : Number(b.cliente_id);
+      if (clienteId !== null && (!Number.isInteger(clienteId) || clienteId < 1)) throw new Erro(400, 'DADOS_INVALIDOS');
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const cli = clienteId ? db.prepare('SELECT id, nome FROM clientes WHERE id = ?').get(clienteId) : null;
+        if (clienteId && !cli) throw new Erro(404, 'CLIENTE_NAO_ENCONTRADO', 'Cliente não encontrado.');
+        // soma quantidades repetidas do mesmo produto antes de conferir o estoque
+        const qtd = new Map();
+        itens.forEach((i) => qtd.set(i.produto_id, (qtd.get(i.produto_id) || 0) + i.quantidade));
+        const linhas = [];
+        for (const [produtoId, quantidade] of qtd) {
+          const produto = db.prepare('SELECT * FROM produtos WHERE id = ? AND ativo = 1').get(produtoId);
+          if (!produto) throw new Erro(404, 'PRODUTO_NAO_ENCONTRADO', 'Produto não encontrado ou inativo.');
+          if (Number(produto.estoque) < quantidade) throw new Erro(400, 'ESTOQUE_INSUFICIENTE', `Estoque insuficiente de ${produto.nome}: há ${produto.estoque}.`);
+          const unitario = centavos(produto.preco);
+          linhas.push({ produto, quantidade, unitario, total: centavos(unitario * quantidade) });
+        }
+        const total = centavos(linhas.reduce((t, l) => t + l.total, 0));
+        const venda = db.prepare('INSERT INTO vendas_avulsas (data, cliente_id, cliente_nome, valor_total, forma) VALUES (?, ?, ?, ?, ?)')
+          .run(agoraSP().data, cli ? cli.id : null, cli ? cli.nome : '', total, forma);
+        const vendaId = Number(venda.lastInsertRowid);
+        for (const l of linhas) {
+          db.prepare('UPDATE produtos SET estoque = estoque - ? WHERE id = ?').run(l.quantidade, l.produto.id);
+          db.prepare('INSERT INTO vendas_avulsas_itens (venda_id, produto_id, nome, quantidade, preco_unitario, valor_total) VALUES (?, ?, ?, ?, ?, ?)')
+            .run(vendaId, l.produto.id, l.produto.nome, l.quantidade, l.unitario, l.total);
+          db.prepare("INSERT INTO movimentos_estoque (produto_id, quantidade, tipo, motivo) VALUES (?, ?, 'venda', ?)")
+            .run(l.produto.id, -l.quantidade, `Venda avulsa nº ${vendaId}`);
+          alertaEstoque(l.produto.id);
+        }
+        db.exec('COMMIT');
+        return json(res, 200, vendaAvulsa(vendaId));
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
+        throw e;
+      }
+    }
+    if (m === 'POST' && rota === 'admin/venda-avulsa/cancelar') {
+      const id = Number((await lerCorpo(req)).id);
+      if (!Number.isInteger(id) || id < 1) throw new Erro(400, 'DADOS_INVALIDOS');
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const venda = db.prepare('SELECT * FROM vendas_avulsas WHERE id = ?').get(id);
+        if (!venda) throw new Erro(404, 'VENDA_NAO_ENCONTRADA', 'Venda não encontrada.');
+        if (venda.status !== 'ativa') throw new Erro(409, 'VENDA_JA_CANCELADA', 'Esta venda já foi cancelada.');
+        const caixa = db.prepare('SELECT status FROM caixas_diarios WHERE data = ?').get(venda.data);
+        if (caixa && caixa.status === 'fechado') throw new Erro(409, 'CAIXA_JA_FECHADO', 'O caixa desse dia já foi fechado; a venda não pode mais ser cancelada.');
+        db.prepare("UPDATE vendas_avulsas SET status = 'cancelada', cancelada_em = datetime('now','localtime') WHERE id = ?").run(id);
+        let devolvidos = 0;
+        for (const it of db.prepare('SELECT produto_id, quantidade FROM vendas_avulsas_itens WHERE venda_id = ? AND produto_id IS NOT NULL').all(id)) {
+          db.prepare('UPDATE produtos SET estoque = estoque + ? WHERE id = ?').run(it.quantidade, it.produto_id);
+          db.prepare("INSERT INTO movimentos_estoque (produto_id, quantidade, tipo, motivo) VALUES (?, ?, 'entrada', ?)")
+            .run(it.produto_id, it.quantidade, `Devolução: venda avulsa nº ${id} cancelada`);
+          devolvidos += Number(it.quantidade);
+        }
+        db.exec('COMMIT');
+        return json(res, 200, { ok: true, produtos_devolvidos: devolvidos });
       } catch (e) {
         try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
         throw e;

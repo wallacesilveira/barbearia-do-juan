@@ -73,6 +73,9 @@
     caixaDiario(data) { return this._get('admin/caixa-diario?data=' + data); },
     abrirCaixa(data, valor, observacao) { return this._post('admin/caixa-diario/abrir', { data, valor_abertura: valor, observacao }); },
     fecharCaixa(data, valor) { return this._post('admin/caixa-diario/fechar', { data, valor_contado: valor }); },
+    vendasAvulsas(data) { return this._get('admin/vendas-avulsas?data=' + data); },
+    vendaAvulsa(itens, forma, clienteId) { return this._post('admin/venda-avulsa', { itens, forma, cliente_id: clienteId || null }); },
+    cancelarVendaAvulsa(id) { return this._post('admin/venda-avulsa/cancelar', { id }); },
     ajusteAgendamento(id, valor) { return this._post('admin/ajuste-agendamento', { id, valor_ajuste: valor }); },
     marcarLembreteEnviado(id) { return this._post('admin/lembrete-enviado', { id }); },
     registrarAberturaLembrete(id) { return this._post('admin/lembrete-aberto', { id }); },
@@ -250,6 +253,9 @@
     caixaDiario(data) { return this._rpc('caixa_diario_resumo', { p_data: data }); },
     abrirCaixa(data, valor, observacao) { return this._rpc('abrir_caixa_diario', { p_data: data, p_valor_abertura: valor, p_observacao: observacao }); },
     fecharCaixa(data, valor) { return this._rpc('fechar_caixa_diario', { p_data: data, p_valor_contado: valor }); },
+    vendasAvulsas(data) { return this._rpc('listar_vendas_avulsas', { p_data: data }); },
+    vendaAvulsa(itens, forma, clienteId) { return this._rpc('registrar_venda_avulsa', { p_itens: itens, p_forma: forma, p_cliente_id: clienteId || null }); },
+    cancelarVendaAvulsa(id) { return this._rpc('cancelar_venda_avulsa', { p_id: id }); },
     excluir(tabela, id) {
       const pk = tabela === 'horarios_funcionamento' ? 'dia_semana' : 'id';
       return this._rest(`${tabela}?${pk}=eq.${id}`, { method: 'DELETE' });

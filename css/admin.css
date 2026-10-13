@@ -284,6 +284,25 @@ a.aviso-barra:hover { border-color: var(--gold); }
 .caixa-dia__cab { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .caixa-dia__cab h2 { margin: 0; }
 .caixa-dia__cab p { margin-top: 2px; color: var(--muted); font-size: 12.5px; }
+/* vendas avulsas: cartão do dia no caixa + seletor de quantidade no formulário */
+.vendas-cartao { margin-bottom: 20px; }
+.vendas { margin: 0; padding: 0; list-style: none; }
+.venda { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--line); }
+.venda:first-child { border-top: 0; }
+.venda__txt { display: flex; flex-direction: column; min-width: 0; }
+.venda__txt b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.venda__txt small { color: var(--muted); font-size: 12.5px; }
+.venda > strong { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.venda.cancelada { opacity: .55; }
+.venda.cancelada > strong { text-decoration: line-through; }
+.vendas-vazio { padding: 16px 20px 18px; color: var(--muted); font-size: 13px; }
+.vendas-vazio b { color: var(--text-2); font-weight: 600; }
+.lista-qtd { max-height: 300px; }
+.escolha--qtd { cursor: default; padding-block: 8px; }
+.escolha--qtd.sel { border-color: var(--gold); background: var(--gold-soft); }
+.qtd { display: flex; align-items: center; gap: 4px; flex: none; }
+.qtd .icone { width: 40px; height: 40px; font-size: 18px; }
+.qtd output { min-width: 28px; text-align: center; font-weight: 600; font-variant-numeric: tabular-nums; }
 .caixa-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto; align-items: start; gap: 12px; }
 .caixa-form .campo { margin: 0; }
 .caixa-form .btn { min-height: 44px; margin-top: 24px; }
@@ -508,7 +527,7 @@ a.aviso-barra:hover { border-color: var(--gold); }
   .caixa-form--fechar { grid-template-columns: 1fr; }
   .ag-row { grid-template-columns: 58px minmax(0, 1fr) auto; gap: 10px; padding: 13px 14px; }
   .ag-hora { font-size: 15px; }
-  .cartao__cab:not(.cartao__cab--sem-borda), .cartao__pad { padding-left: 16px; padding-right: 16px; }
+  .cartao__cab:not(.cartao__cab--sem-borda), .cartao__pad, .venda, .vendas-vazio { padding-left: 16px; padding-right: 16px; }
   .destaque { padding: 14px 16px; gap: 2px 14px; }
   .destaque__hora { font-size: 24px; }
   .seg { width: 100%; }

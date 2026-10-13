@@ -97,6 +97,9 @@
     AGENDAMENTO_PASSADO: 'O horário deste agendamento já passou.',
     AGENDAMENTO_NAO_ENCONTRADO: 'Agendamento não encontrado. Atualize a página.',
     PRODUTO_NAO_ENCONTRADO: 'Produto indisponível. Atualize a página.',
+    VENDA_NAO_ENCONTRADA: 'Venda não encontrada. Atualize a página.',
+    VENDA_JA_CANCELADA: 'Esta venda já foi cancelada.',
+    CLIENTE_NAO_ENCONTRADO: 'Cliente não encontrado. Atualize a página.',
     EM_USO: 'Este item tem histórico e não pode ser excluído. Desative-o para escondê-lo.',
     23503: 'Este item tem histórico e não pode ser excluído. Desative-o para escondê-lo.',
     REDE: 'Sem conexão com o servidor. Verifique a internet e tente de novo.',
@@ -518,6 +521,100 @@
     });
   }
 
+  /* --------------------------------------------- venda avulsa (balcão, sem agendamento) */
+  function formVendaAvulsa(aoCriar) {
+    const disponiveis = D.produtos.filter((p) => p.ativo && p.estoque > 0);
+    if (!disponiveis.length) return toast('Não há produtos com estoque disponível.', false);
+    const qtd = {}; // produto_id -> quantidade escolhida
+    let clientes = [];
+    seguro(() => Api.clientes()).then((r) => {
+      clientes = (r && r.clientes) || [];
+      const dl = $('#va-clientes');
+      if (dl) dl.innerHTML = clientes.map((c) => `<option value="${esc(c.nome)}">${c.whatsapp ? esc(fmtTel(c.whatsapp)) : ''}</option>`).join('');
+    });
+    const clienteEscolhido = () => {
+      const nome = ($('#va-cliente').value || '').trim().toLowerCase();
+      return nome ? clientes.find((c) => c.nome.trim().toLowerCase() === nome) || null : null;
+    };
+    const itens = () => disponiveis.filter((p) => qtd[p.id] > 0).map((p) => ({ produto: p, quantidade: qtd[p.id] }));
+    abrirModal({
+      titulo: 'Venda avulsa',
+      corpo: `<p class="sub">Para quem vem só comprar um produto. O estoque baixa e o valor entra no caixa do dia, sem ocupar horário na agenda.</p>
+        <fieldset class="campo"><legend class="rotulo">Produtos</legend><div class="lista-escolha lista-qtd">${disponiveis.map((p) => `
+          <div class="escolha escolha--qtd" data-va-prod="${p.id}"><span class="escolha__txt"><b>${esc(p.nome)}</b><small>${A.fmtBRL(p.preco)} · ${p.estoque} em estoque</small></span>
+            <div class="qtd"><button type="button" class="icone" data-va="-1" aria-label="Tirar uma unidade de ${esc(p.nome)}" disabled>−</button><output aria-live="polite">0</output><button type="button" class="icone" data-va="1" aria-label="Adicionar uma unidade de ${esc(p.nome)}">+</button></div></div>`).join('')}</div></fieldset>
+        <fieldset class="campo"><legend class="rotulo">Forma de pagamento</legend><div class="opcoes">${Object.entries(FORMAS).map(([k, v]) => `<label class="opcao"><input type="radio" name="va-forma" value="${k}" ${k === 'pix' ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div></fieldset>
+        <div class="campo"><label for="va-cliente">Cliente <span class="opcional">opcional</span></label><input id="va-cliente" list="va-clientes" autocomplete="off" maxlength="80" placeholder="Busque um cliente cadastrado"><datalist id="va-clientes"></datalist>
+          <small id="va-cliente-info">Deixe em branco se o cliente não quiser se identificar.</small></div>
+        <div class="previa"><span id="va-resumo">Nenhum produto escolhido</span><strong id="va-total">${A.fmtBRL(0)}</strong></div>`,
+      rodape: '<button type="button" class="btn" data-fechar>Cancelar</button><button type="submit" class="btn btn--solid" id="va-salvar" disabled>Registrar venda</button>',
+      aberto() {
+        const calc = () => {
+          const lista = itens();
+          const total = centavos(lista.reduce((t, i) => t + i.produto.preco * i.quantidade, 0));
+          const un = lista.reduce((t, i) => t + i.quantidade, 0);
+          $('#va-resumo').textContent = un ? plural(un, 'item', 'itens') : 'Nenhum produto escolhido';
+          $('#va-total').textContent = A.fmtBRL(total);
+          $('#va-salvar').disabled = !un;
+          $('#va-salvar').textContent = un ? `Registrar venda · ${A.fmtBRL(total)}` : 'Registrar venda';
+          const txt = ($('#va-cliente').value || '').trim();
+          const cli = clienteEscolhido();
+          $('#va-cliente-info').textContent = !txt ? 'Deixe em branco se o cliente não quiser se identificar.'
+            : cli ? `Venda vinculada a ${BJ.nome(cli.nome)}${cli.whatsapp ? ' · ' + fmtTel(cli.whatsapp) : ''}.`
+              : 'Cliente não encontrado. Escolha um nome da lista ou deixe em branco.';
+        };
+        $('#modal-corpo').onclick = (e) => {
+          const b = e.target.closest('[data-va]');
+          if (!b) return;
+          const linha = b.closest('[data-va-prod]');
+          const p = disponiveis.find((x) => x.id === Number(linha.dataset.vaProd));
+          const n = Math.min(p.estoque, Math.max(0, (qtd[p.id] || 0) + Number(b.dataset.va)));
+          if (Number(b.dataset.va) > 0 && n === (qtd[p.id] || 0)) toast(`Só há ${plural(p.estoque, 'unidade', 'unidades')} de ${p.nome} em estoque.`, false);
+          qtd[p.id] = n;
+          $('output', linha).textContent = n;
+          linha.classList.toggle('sel', n > 0);
+          $('[data-va="-1"]', linha).disabled = n === 0;
+          $('[data-va="1"]', linha).disabled = n >= p.estoque;
+          calc();
+        };
+        $('#modal-corpo').oninput = calc;
+        calc();
+      },
+      async enviar() {
+        const lista = itens();
+        if (!lista.length) return toast('Escolha ao menos um produto.', false);
+        const forma = ($('input[name="va-forma"]:checked') || {}).value;
+        if (!forma) return toast('Escolha a forma de pagamento.', false);
+        const txt = ($('#va-cliente').value || '').trim();
+        const cli = clienteEscolhido();
+        if (txt && !cli) { $('#va-cliente').focus(); return toast('Cliente não encontrado. Escolha um nome da lista ou deixe em branco.', false); }
+        const venda = await seguro(() => Api.vendaAvulsa(lista.map((i) => ({ produto_id: i.produto.id, quantidade: i.quantidade })), forma, cli ? cli.id : null));
+        if (!venda) return;
+        fecharModal();
+        await recarregar();
+        toast(`Venda de ${A.fmtBRL(venda.valor_total)} registrada${forma === 'dinheiro' ? '. Entrou no caixa do dia' : ''}.`);
+        if (aoCriar) aoCriar(venda);
+      },
+    });
+  }
+  const resumoItens = (v) => v.itens.map((i) => (i.quantidade > 1 ? `${i.quantidade}× ` : '') + i.nome).join(', ');
+  function cartaoVendasAvulsas(vendas, caixaFechado) {
+    if (vendas == null) {
+      return `<div class="cartao cartao__pad vendas-cartao"><h2>Vendas avulsas</h2><p class="nota">${BJIcons.svg('alert')}Não foi possível carregar as vendas avulsas. Se o painel usa o Supabase, rode o arquivo supabase/vendas-avulsas.sql no SQL Editor.</p></div>`;
+    }
+    const ativas = vendas.filter((v) => v.status === 'ativa');
+    const total = centavos(ativas.reduce((t, v) => t + Number(v.valor_total), 0));
+    return `<div class="cartao vendas-cartao"><div class="cartao__cab"><div><h2>Vendas avulsas de hoje</h2>
+        <p>${ativas.length ? `${plural(ativas.length, 'venda', 'vendas')} · <b>${A.fmtBRL(total)}</b>` : 'Produtos vendidos no balcão, sem atendimento.'}</p></div>
+        <button type="button" class="btn btn--sm btn--sec" data-venda-avulsa><i data-icon="plus"></i>Nova venda</button></div>
+      ${vendas.length ? `<ul class="vendas">${vendas.map((v) => `<li class="venda${v.status === 'ativa' ? '' : ' cancelada'}">
+          <div class="venda__txt"><b>${esc(resumoItens(v))}</b>
+            <small>${esc((quando(v.criado_em).split(' às ')[1]) || '')} · ${esc(FORMAS[v.forma] || v.forma)}${v.cliente_nome ? ' · ' + esc(BJ.nome(v.cliente_nome)) : ''}${v.status === 'ativa' ? '' : ' · cancelada'}</small></div>
+          <strong>${A.fmtBRL(v.valor_total)}</strong>
+          ${v.status === 'ativa' && !caixaFechado ? `<button type="button" class="icone perigo" data-cancelar-venda="${v.id}" aria-label="Cancelar venda de ${esc(resumoItens(v))}" title="Cancelar venda">${BJIcons.svg('ban')}</button>` : ''}</li>`).join('')}</ul>`
+        : `<p class="vendas-vazio">Nenhuma venda avulsa hoje. Quando alguém vier só comprar um produto, registre em <b>Nova venda</b>.</p>`}</div>`;
+  }
+
   /* ------------------------------------------------- agendamento presencial */
   async function abrirAgendamentoAdmin(dataInicial, aoCriar) {
     const servicos = D.servicos.filter((s) => s.ativo);
@@ -762,7 +859,8 @@
 
   async function vCaixa(c) {
     const dia = hojeIso();
-    const [resumo, caixaDia] = await Promise.all([Api.caixa(), Api.caixaDiario(dia)]);
+    // vendas avulsas falham sozinhas (ex.: SQL novo ainda não rodado no Supabase) sem derrubar a página
+    const [resumo, caixaDia, vendas] = await Promise.all([Api.caixa(), Api.caixaDiario(dia), Api.vendasAvulsas(dia).catch(() => null)]);
     const render = () => {
       const p = resumo[S.periodo] || resumo.hoje;
       const faixa = S.periodo === 'total' ? 'Todo o histórico' : p.de === p.ate ? A.fmtData(p.de) : `${A.fmtData(p.de)} a ${A.fmtData(p.ate)}`;
@@ -775,7 +873,7 @@
         <div class="periodo-cab"><div class="seg" role="tablist" aria-label="Período">${Object.entries(PERIODOS).map(([k, v]) => `<button type="button" role="tab" aria-selected="${k === S.periodo}" data-periodo="${k}">${v}</button>`).join('')}</div>
           <span class="periodo-faixa">${esc(faixa)}</span></div>
         <div class="kpis">
-          ${kpi('Faturamento', A.fmtBRL(p.total), plural(p.agendamentos, 'atendimento', 'atendimentos'), 'kpi--destaque')}
+          ${kpi('Faturamento', A.fmtBRL(p.total), plural(p.agendamentos, 'atendimento', 'atendimentos') + (p.vendas_avulsas ? ' · ' + plural(p.vendas_avulsas, 'venda avulsa', 'vendas avulsas') : ''), 'kpi--destaque')}
           ${kpi('Recebido', A.fmtBRL(p.recebido), 'Entradas no período')}
           ${kpi('A receber', A.fmtBRL(p.a_receber), 'Dos atendimentos do período', p.a_receber > 0 ? 'kpi--alerta' : '')}
           ${kpi('Ticket médio', A.fmtBRL(p.ticket_medio), 'Por atendimento')}
@@ -785,7 +883,7 @@
             ${p.total || p.descontos ? `<div class="divisao" aria-hidden="true"><span style="width:${100 - pctProd}%"></span><span style="width:${pctProd}%"></span></div>
             <ul class="recibo">
               <li><span><i class="ponto ponto--1"></i>Serviços e combos</span><b>${A.fmtBRL(p.servicos)}</b></li>
-              <li><span><i class="ponto ponto--2"></i>Produtos</span><b>${A.fmtBRL(p.produtos)}</b></li>
+              <li><span><i class="ponto ponto--2"></i>Produtos${p.valor_avulsas ? `<small>${A.fmtBRL(p.valor_avulsas)} em vendas avulsas</small>` : ''}</span><b>${A.fmtBRL(p.produtos)}</b></li>
               ${p.adicionais ? `<li class="pos"><span>Adicionais</span><b>+ ${A.fmtBRL(p.adicionais)}</b></li>` : ''}
               ${p.descontos ? `<li class="neg"><span>Descontos</span><b>− ${A.fmtBRL(p.descontos)}</b></li>` : ''}
               <li class="recibo__total"><span>Total</span><b>${A.fmtBRL(p.total)}</b></li></ul>` : vazio('receipt', 'Sem atendimentos neste período')}</div>
@@ -797,10 +895,20 @@
           ${top.length ? `<div class="barras barras--ranking">${top.map((s, i) => barra(`<i class="pos-rank">${i + 1}</i>${esc(s.nome)}`, s.quantidade, maxTop, `${s.quantidade}×<small>${A.fmtBRL(s.valor)}</small>`, i === 0 ? 'barra--top' : '')).join('')}</div>`
             : vazio('scissors', 'Nenhum serviço vendido neste período')}</div>`;
     };
-    c.innerHTML = `<div class="pg-topo"><div><h1>Caixa</h1><p>Abertura e fechamento do dia, faturamento e formas de pagamento.</p></div></div>
-      ${cartaoCaixaDia(caixaDia, dia)}<div id="caixa-periodo"></div>`;
+    c.innerHTML = `<div class="pg-topo"><div><h1>Caixa</h1><p>Abertura e fechamento do dia, faturamento e formas de pagamento.</p></div>
+        <div class="pg-acoes"><button type="button" class="btn btn--solid" data-venda-avulsa><i data-icon="box"></i>Venda avulsa</button></div></div>
+      ${cartaoCaixaDia(caixaDia, dia)}${cartaoVendasAvulsas(vendas, caixaDia.status === 'fechado')}<div id="caixa-periodo"></div>`;
     render();
-    c.onclick = (e) => {
+    c.onclick = async (e) => {
+      if (e.target.closest('[data-venda-avulsa]')) return formVendaAvulsa(() => refazer());
+      const cv = e.target.closest('[data-cancelar-venda]');
+      if (cv) {
+        const v = vendas.find((x) => x.id === Number(cv.dataset.cancelarVenda));
+        if (!(await confirma([`Cancelar a venda de ${resumoItens(v)} (${A.fmtBRL(v.valor_total)})?`, `Os produtos voltam para o estoque e o valor sai do caixa${v.forma === 'dinheiro' ? '. Devolva o dinheiro ao cliente' : ''}.`], 'Cancelar venda'))) return;
+        const r = await seguro(() => Api.cancelarVendaAvulsa(v.id));
+        if (r) { await recarregar(); toast('Venda cancelada. Os produtos voltaram ao estoque.'); refazer(); }
+        return;
+      }
       const b = e.target.closest('[data-periodo]');
       if (b) { S.periodo = b.dataset.periodo; render(); BJIcons.hydrate(c); $(`[data-periodo="${S.periodo}"]`).focus(); }
     };
@@ -992,8 +1100,8 @@
     const produtos = D.produtos || [];
     const baixos = produtos.filter((p) => p.ativo && p.estoque <= p.estoque_minimo).length;
     const estoqueTag = (p) => (p.estoque === 0 ? pill(['Sem estoque', 'err']) : p.estoque <= p.estoque_minimo ? pill(['Estoque baixo', 'warn']) : '');
-    c.innerHTML = `<div class="pg-topo"><div><h1>Produtos</h1><p>Itens vendidos no balcão. A venda é feita pelo detalhe do agendamento e baixa o estoque automaticamente.</p></div>
-        <div class="pg-acoes"><button type="button" class="btn btn--solid" data-produto-novo><i data-icon="plus"></i>Novo produto</button></div></div>
+    c.innerHTML = `<div class="pg-topo"><div><h1>Produtos</h1><p>Itens vendidos no balcão. Venda junto com o atendimento pelo detalhe do agendamento, ou sozinha em Venda avulsa. O estoque baixa automaticamente.</p></div>
+        <div class="pg-acoes"><button type="button" class="btn btn--sec" data-venda-avulsa><i data-icon="box"></i>Venda avulsa</button><button type="button" class="btn btn--solid" data-produto-novo><i data-icon="plus"></i>Novo produto</button></div></div>
       ${baixos ? `<div class="aviso-barra aviso-barra--alerta">${BJIcons.svg('alert')}<span><b>${plural(baixos, 'produto está', 'produtos estão')} com estoque baixo.</b> Registre a reposição para continuar vendendo.</span></div>` : ''}
       <div class="cartao">${produtos.length ? `<div class="lista">${produtos.map((p) => `
         <div class="item${p.ativo ? '' : ' inativo'}"><div class="item__foto item__foto--ic"><i data-icon="box"></i></div>
@@ -1005,6 +1113,7 @@
             <button type="button" class="icone perigo" data-produto-excluir="${p.id}" aria-label="Excluir ${esc(p.nome)}"><i data-icon="trash"></i></button></div>
         </div>`).join('')}</div>` : vazio('box', 'Nenhum produto cadastrado', 'Cadastre pomadas, óleos e outros itens para vender junto com o atendimento.', '<button type="button" class="btn btn--sm btn--sec" data-produto-novo>Cadastrar produto</button>')}</div>`;
     c.onclick = async (e) => {
+      if (e.target.closest('[data-venda-avulsa]')) return formVendaAvulsa(() => refazer());
       if (e.target.closest('[data-produto-novo]')) return formProduto(null);
       const ed = e.target.closest('[data-produto-editar]');
       if (ed) return formProduto(produtos.find((p) => p.id === Number(ed.dataset.produtoEditar)));
