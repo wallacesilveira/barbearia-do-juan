@@ -115,6 +115,28 @@ CREATE TABLE IF NOT EXISTS vendas_avulsas_itens (
   preco_unitario REAL NOT NULL CHECK (preco_unitario >= 0), valor_total REAL NOT NULL CHECK (valor_total >= 0));
 CREATE INDEX IF NOT EXISTS idx_vendas_avulsas_data ON vendas_avulsas (data, status);
 CREATE INDEX IF NOT EXISTS idx_vendas_avulsas_itens ON vendas_avulsas_itens (venda_id, id);
+CREATE TABLE IF NOT EXISTS estornos (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agendamento_id INTEGER NOT NULL REFERENCES agendamentos(id) ON DELETE CASCADE,
+  valor REAL NOT NULL CHECK (valor > 0),
+  forma TEXT NOT NULL CHECK (forma IN ('dinheiro','pix','cartao','outro')),
+  criado_em TEXT NOT NULL DEFAULT (datetime('now','localtime')));
+CREATE INDEX IF NOT EXISTS idx_estornos_ag ON estornos (agendamento_id);
+CREATE TABLE IF NOT EXISTS remarcacoes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agendamento_id INTEGER NOT NULL REFERENCES agendamentos(id) ON DELETE CASCADE,
+  data_anterior TEXT NOT NULL, inicio_anterior INTEGER NOT NULL,
+  data_nova TEXT NOT NULL, inicio_novo INTEGER NOT NULL,
+  criado_em TEXT NOT NULL DEFAULT (datetime('now','localtime')));
+CREATE INDEX IF NOT EXISTS idx_remarcacoes_ag ON remarcacoes (agendamento_id);
+CREATE TABLE IF NOT EXISTS movimentos_caixa (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL,
+  tipo TEXT NOT NULL CHECK (tipo IN ('sangria','despesa','reforco')),
+  valor REAL NOT NULL CHECK (valor > 0),
+  forma TEXT NOT NULL DEFAULT 'dinheiro' CHECK (forma IN ('dinheiro','pix','cartao','outro')),
+  descricao TEXT NOT NULL DEFAULT '',
+  criado_em TEXT NOT NULL DEFAULT (datetime('now','localtime')));
+CREATE INDEX IF NOT EXISTS idx_movimentos_caixa_data ON movimentos_caixa (data);
 `);
 try {
   const cols = db.prepare('PRAGMA table_info(agendamentos)').all();
@@ -258,8 +280,10 @@ function formatarAgendamento(a) {
   const produtos = db.prepare('SELECT nome, quantidade, preco_unitario, valor_total FROM agendamento_produtos WHERE agendamento_id = ? ORDER BY id').all(a.id).map((p) => ({ ...p }));
   const pagamentos = db.prepare('SELECT id, valor, forma, recebido_em FROM recebimentos_agendamento WHERE agendamento_id = ? ORDER BY recebido_em, id').all(a.id).map((p) => ({ ...p, valor: Number(p.valor) }));
   const totalPago = Math.round(pagamentos.reduce((s, p) => s + p.valor, 0) * 100) / 100;
+  const estornos = db.prepare('SELECT id, valor, forma, criado_em FROM estornos WHERE agendamento_id = ? ORDER BY id').all(a.id).map((e) => ({ ...e, valor: Number(e.valor) }));
+  const remarcacoes = db.prepare('SELECT data_anterior, inicio_anterior, data_nova, inicio_novo, criado_em FROM remarcacoes WHERE agendamento_id = ? ORDER BY id').all(a.id).map((r) => ({ ...r }));
   const { cliente_id, ...resto } = a;
-  return { ...resto, valor_consulta: !!a.valor_consulta, valor_ajuste: Number(a.valor_ajuste || 0), valor_produtos: Number(a.valor_produtos || 0), total_pago: totalPago, saldo_devedor: Math.max(0, Number(a.valor_total || 0) - totalPago), pagamentos, cliente: { ...cli }, servicos, produtos };
+  return { ...resto, valor_consulta: !!a.valor_consulta, valor_ajuste: Number(a.valor_ajuste || 0), valor_produtos: Number(a.valor_produtos || 0), total_pago: totalPago, saldo_devedor: Math.max(0, Number(a.valor_total || 0) - totalPago), pagamentos, estornos, remarcacoes, cliente: { ...cli }, servicos, produtos };
 }
 const centavos = (v) => Math.round(Number(v || 0) * 100) / 100;
 function isoMais(iso, dias) {
@@ -296,6 +320,10 @@ function resumoCaixa() {
     FROM vendas_avulsas WHERE status = 'ativa' AND data BETWEEN ? AND ?`);
   const porFormaAvulsas = db.prepare(`SELECT forma, SUM(valor_total) AS total FROM vendas_avulsas
     WHERE status = 'ativa' AND data BETWEEN ? AND ? GROUP BY forma`);
+  const porFormaEstornos = db.prepare(`SELECT forma, SUM(valor) AS total FROM estornos
+    WHERE date(criado_em) BETWEEN ? AND ? GROUP BY forma`);
+  const somaDespesas = db.prepare(`SELECT COALESCE(SUM(valor), 0) AS total FROM movimentos_caixa
+    WHERE tipo = 'despesa' AND data BETWEEN ? AND ?`);
   const ranking = db.prepare(`
     SELECT s.nome, COUNT(*) AS quantidade, COALESCE(SUM(s.preco), 0) AS valor
     FROM agendamento_servicos s JOIN agendamentos a ON a.id = s.agendamento_id
@@ -310,7 +338,12 @@ function resumoCaixa() {
     // vendas avulsas (balcão, sem agendamento) entram como produtos e já estão pagas
     const av = somaAvulsas.get(de, ate);
     porFormaAvulsas.all(de, ate).forEach((f) => { formas[f.forma] = centavos(formas[f.forma] + Number(f.total)); });
+    // devoluções de agendamentos cancelados saem da forma em que o cliente pagou
+    let devolvido = 0;
+    porFormaEstornos.all(de, ate).forEach((f) => { formas[f.forma] = centavos(formas[f.forma] - Number(f.total)); devolvido += Number(f.total); });
     const total = centavos(Number(p.total) + Number(av.total));
+    const recebido = centavos(Object.values(formas).reduce((s, v) => s + v, 0));
+    const despesas = centavos(somaDespesas.get(de, ate).total);
     out[k] = {
       de, ate,
       agendamentos: Number(p.agendamentos || 0),
@@ -323,7 +356,10 @@ function resumoCaixa() {
       total,
       a_receber: centavos(Math.max(0, Number(p.total) - Number(p.pago || 0))),
       ticket_medio: p.agendamentos ? centavos(p.total / p.agendamentos) : 0,
-      recebido: centavos(Object.values(formas).reduce((s, v) => s + v, 0)),
+      recebido,
+      devolvido: centavos(devolvido),
+      despesas,
+      saldo: centavos(recebido - despesas),
       por_forma: formas,
       servicos_mais_vendidos: ranking.all(de, ate).map((s) => ({ nome: s.nome, quantidade: Number(s.quantidade), valor: centavos(s.valor) })),
     };
@@ -338,16 +374,41 @@ function dinheiroDoDia(data) {
     FROM vendas_avulsas WHERE forma = 'dinheiro' AND status = 'ativa' AND data = ?`).get(data).total || 0);
   return centavos(comandas + avulsas);
 }
+/** Dinheiro devolvido da gaveta no dia (estornos de agendamentos cancelados). */
+function devolvidoDoDia(data) {
+  return centavos(db.prepare(`SELECT COALESCE(SUM(valor), 0) AS total
+    FROM estornos WHERE forma = 'dinheiro' AND date(criado_em) = ?`).get(data).total || 0);
+}
+/** Sangrias, despesas e reforços lançados no caixa do dia. */
+function movimentosCaixa(data) {
+  return db.prepare('SELECT id, tipo, valor, forma, descricao, criado_em FROM movimentos_caixa WHERE data = ? ORDER BY id').all(data)
+    .map((mv) => ({ ...mv, valor: Number(mv.valor) }));
+}
+/** Conta da gaveta: troco + entradas em dinheiro + reforços − devoluções − sangrias − despesas em dinheiro. */
+function contaGaveta(data, abertura) {
+  const movs = movimentosCaixa(data);
+  const soma = (fn) => centavos(movs.filter(fn).reduce((t, mv) => t + mv.valor, 0));
+  const c = {
+    recebido_dinheiro: dinheiroDoDia(data),
+    devolvido_dinheiro: devolvidoDoDia(data),
+    sangrias: soma((mv) => mv.tipo === 'sangria'),
+    despesas_dinheiro: soma((mv) => mv.tipo === 'despesa' && mv.forma === 'dinheiro'),
+    reforcos: soma((mv) => mv.tipo === 'reforco'),
+    movimentos: movs,
+  };
+  c.saidas_dinheiro = centavos(c.devolvido_dinheiro + c.sangrias + c.despesas_dinheiro);
+  c.valor_esperado = abertura == null ? null : centavos(abertura + c.recebido_dinheiro + c.reforcos - c.saidas_dinheiro);
+  return c;
+}
 function resumoCaixaDiario(data) {
   const caixa = db.prepare('SELECT * FROM caixas_diarios WHERE data = ?').get(data);
-  const recebidoDinheiro = dinheiroDoDia(data);
   const valorAbertura = caixa ? Number(caixa.valor_abertura) : null;
-  const valorEsperado = caixa ? Math.round((valorAbertura + recebidoDinheiro) * 100) / 100 : null;
+  const { valor_esperado: valorEsperado, ...conta } = contaGaveta(data, valorAbertura);
   return {
     data,
     status: caixa ? caixa.status : 'nao_aberto',
     valor_abertura: valorAbertura,
-    recebido_dinheiro: recebidoDinheiro,
+    ...conta,
     valor_esperado: valorEsperado,
     valor_contado: caixa && caixa.valor_contado != null ? Number(caixa.valor_contado) : null,
     diferenca: caixa && caixa.diferenca != null ? Number(caixa.diferenca) : null,
@@ -538,6 +599,40 @@ function criarAgendamentoAdmin(b) {
   }
 }
 
+/** Muda data/horário mantendo serviços, valores, pagamentos e produtos. Mesmas regras do agendamento pelo painel. */
+function reagendarAgendamento(b) {
+  const id = Number(b.id);
+  const data = String(b.data || '');
+  const inicioMin = Number(b.inicio_min);
+  if (!Number.isInteger(id) || id < 1 || !/^\d{4}-\d{2}-\d{2}$/.test(data) || !Number.isInteger(inicioMin)) return { ok: false, erro: 'DADOS_INVALIDOS' };
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const ag = db.prepare('SELECT * FROM agendamentos WHERE id = ?').get(id);
+    if (!ag) { db.exec('ROLLBACK'); return { ok: false, erro: 'AGENDAMENTO_NAO_ENCONTRADO' }; }
+    if (ag.status !== 'confirmado') { db.exec('ROLLBACK'); return { ok: false, erro: 'AGENDAMENTO_CANCELADO' }; }
+    if (ag.data === data && ag.inicio_min === inicioMin) { db.exec('ROLLBACK'); return { ok: false, erro: 'MESMO_HORARIO' }; }
+    const validacao = A.validarHorario({
+      data, inicio_min: inicioMin, duracao: ag.duracao_min,
+      horarios: todos('SELECT * FROM horarios_funcionamento'), config: getConfig(),
+      bloqueios: todos('SELECT * FROM bloqueios WHERE data = ?', data),
+      // o próprio horário atual não conta como ocupado
+      ocupados: db.prepare("SELECT inicio_min ini, fim_min fim FROM agendamentos WHERE data = ? AND status = 'confirmado' AND id <> ?").all(data, id).map((o) => ({ ...o })),
+    });
+    if (!validacao.ok) { db.exec('ROLLBACK'); return { ok: false, erro: validacao.motivo }; }
+    db.prepare('INSERT INTO remarcacoes (agendamento_id, data_anterior, inicio_anterior, data_nova, inicio_novo) VALUES (?, ?, ?, ?, ?)')
+      .run(id, ag.data, ag.inicio_min, data, inicioMin);
+    // o lembrete enviado era do horário antigo: volta a "não enviado"
+    db.prepare(`UPDATE agendamentos SET data = ?, inicio_min = ?, fim_min = ?,
+      lembrete_enviado_em = NULL, lembrete_envios = 0, lembrete_aberto_em = NULL, lembrete_aberturas = 0 WHERE id = ?`)
+      .run(data, inicioMin, inicioMin + Number(ag.duracao_min), id);
+    db.exec('COMMIT');
+    return { ok: true, agendamento: formatarAgendamento(db.prepare('SELECT * FROM agendamentos WHERE id = ?').get(id)) };
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
+    throw e;
+  }
+}
+
 /* ---------------------------------------------------------------- admin CRUD */
 const TABELAS = {
   servicos: { cols: ['nome', 'descricao', 'duracao_min', 'preco', 'foto', 'ordem', 'ativo'], pk: 'id' },
@@ -711,6 +806,10 @@ async function api(req, res, url) {
       const resultado = criarAgendamentoAdmin(await lerCorpo(req));
       return json(res, resultado.ok ? 200 : 409, resultado);
     }
+    if (m === 'POST' && rota === 'admin/reagendar') {
+      const resultado = reagendarAgendamento(await lerCorpo(req));
+      return json(res, resultado.ok ? 200 : 409, resultado);
+    }
     if (m === 'GET' && rota === 'admin/caixa-diario') {
       const data = url.searchParams.get('data') || agoraSP().data;
       if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) throw new Erro(400, 'DATA_INVALIDA');
@@ -744,13 +843,61 @@ async function api(req, res, url) {
         const caixa = db.prepare('SELECT * FROM caixas_diarios WHERE data = ?').get(data);
         if (!caixa) throw new Erro(404, 'CAIXA_NAO_ABERTO', 'Abra o caixa antes de fechá-lo.');
         if (caixa.status !== 'aberto') throw new Erro(409, 'CAIXA_JA_FECHADO', 'Este caixa já foi fechado.');
-        const recebido = dinheiroDoDia(data);
-        const esperado = Math.round((Number(caixa.valor_abertura) + recebido) * 100) / 100;
+        const esperado = contaGaveta(data, Number(caixa.valor_abertura)).valor_esperado;
         const diferenca = Math.round((contado - esperado) * 100) / 100;
         db.prepare("UPDATE caixas_diarios SET valor_contado = ?, diferenca = ?, status = 'fechado', fechado_em = datetime('now','localtime') WHERE data = ?")
           .run(contado, diferenca, data);
         db.exec('COMMIT');
         return json(res, 200, resumoCaixaDiario(data));
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
+        throw e;
+      }
+    }
+    if (m === 'POST' && rota === 'admin/caixa-movimento') {
+      const b = await lerCorpo(req);
+      const tipo = String(b.tipo || '');
+      const valor = centavos(b.valor);
+      // sangria e reforço são sempre dinheiro da gaveta; despesa pode ter sido paga de outra forma
+      const forma = tipo === 'despesa' ? String(b.forma || 'dinheiro') : 'dinheiro';
+      const descricao = String(b.descricao || '').trim().slice(0, 120);
+      if (!['sangria', 'despesa', 'reforco'].includes(tipo) || !FORMAS_PAGAMENTO.includes(forma)
+          || !Number.isFinite(valor) || valor <= 0 || valor > 1e9) {
+        throw new Erro(400, 'DADOS_INVALIDOS', 'Informe o tipo, um valor válido e a forma de pagamento.');
+      }
+      if (tipo === 'despesa' && !descricao) throw new Erro(400, 'DESCRICAO_OBRIGATORIA', 'Diga com o que foi a despesa.');
+      const data = agoraSP().data;
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const caixa = db.prepare('SELECT * FROM caixas_diarios WHERE data = ?').get(data);
+        if (forma === 'dinheiro') {
+          if (!caixa) throw new Erro(409, 'CAIXA_NAO_ABERTO', 'Abra o caixa de hoje antes de mexer no dinheiro da gaveta.');
+          if (caixa.status === 'fechado') throw new Erro(409, 'CAIXA_JA_FECHADO', 'O caixa de hoje já foi fechado.');
+          if (tipo !== 'reforco') {
+            const disponivel = contaGaveta(data, Number(caixa.valor_abertura)).valor_esperado;
+            if (valor > disponivel) throw new Erro(400, 'SALDO_GAVETA_INSUFICIENTE', `Na gaveta deveria haver só ${disponivel.toFixed(2).replace('.', ',')}.`);
+          }
+        }
+        db.prepare('INSERT INTO movimentos_caixa (data, tipo, valor, forma, descricao) VALUES (?, ?, ?, ?, ?)').run(data, tipo, valor, forma, descricao);
+        db.exec('COMMIT');
+        return json(res, 200, resumoCaixaDiario(data));
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
+        throw e;
+      }
+    }
+    if (m === 'POST' && rota === 'admin/caixa-movimento/excluir') {
+      const id = Number((await lerCorpo(req)).id);
+      if (!Number.isInteger(id) || id < 1) throw new Erro(400, 'DADOS_INVALIDOS');
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const mv = db.prepare('SELECT * FROM movimentos_caixa WHERE id = ?').get(id);
+        if (!mv) throw new Erro(404, 'MOVIMENTO_NAO_ENCONTRADO', 'Lançamento não encontrado.');
+        const caixa = db.prepare('SELECT status FROM caixas_diarios WHERE data = ?').get(mv.data);
+        if (caixa && caixa.status === 'fechado') throw new Erro(409, 'CAIXA_JA_FECHADO', 'O caixa desse dia já foi fechado; o lançamento não pode mais ser excluído.');
+        db.prepare('DELETE FROM movimentos_caixa WHERE id = ?').run(id);
+        db.exec('COMMIT');
+        return json(res, 200, resumoCaixaDiario(mv.data));
       } catch (e) {
         try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
         throw e;
@@ -964,14 +1111,28 @@ async function api(req, res, url) {
       return json(res, 200, db.prepare('SELECT * FROM agendamentos WHERE data BETWEEN ? AND ? ORDER BY data, inicio_min').all(de, ate).map((a) => formatarAgendamento({ ...a })));
     }
     if (m === 'POST' && rota === 'admin/cancelar') {
-      const id = Number((await lerCorpo(req)).id);
+      const b = await lerCorpo(req);
+      const id = Number(b.id);
+      const devolver = b.devolver === true;
       db.exec('BEGIN IMMEDIATE');
       try {
         const ag = db.prepare('SELECT id, codigo, status FROM agendamentos WHERE id = ?').get(id);
         if (!ag) throw new Erro(404, 'AGENDAMENTO_NAO_ENCONTRADO');
-        let devolvidos = 0;
+        let devolvidos = 0, estornado = 0;
         if (ag.status === 'confirmado') {
           db.prepare("UPDATE agendamentos SET status = 'cancelado' WHERE id = ?").run(id);
+          // devolução ao cliente: um estorno por forma de pagamento, lançado no caixa de hoje
+          if (devolver) {
+            const formas = db.prepare('SELECT forma, SUM(valor) AS total FROM recebimentos_agendamento WHERE agendamento_id = ? GROUP BY forma').all(id);
+            if (formas.some((f) => f.forma === 'dinheiro')) {
+              const caixa = db.prepare('SELECT status FROM caixas_diarios WHERE data = ?').get(agoraSP().data);
+              if (caixa && caixa.status === 'fechado') throw new Erro(409, 'CAIXA_JA_FECHADO', 'O caixa de hoje já foi fechado; não dá para devolver dinheiro agora. Cancele sem devolver ou devolva por fora.');
+            }
+            for (const f of formas) {
+              db.prepare('INSERT INTO estornos (agendamento_id, valor, forma) VALUES (?, ?, ?)').run(id, centavos(f.total), f.forma);
+              estornado += Number(f.total);
+            }
+          }
           // produtos vendidos na comanda voltam para o estoque
           const itens = db.prepare('SELECT produto_id, quantidade FROM agendamento_produtos WHERE agendamento_id = ? AND produto_id IS NOT NULL').all(id);
           for (const it of itens) {
@@ -982,7 +1143,7 @@ async function api(req, res, url) {
           }
         }
         db.exec('COMMIT');
-        return json(res, 200, { ok: true, produtos_devolvidos: devolvidos });
+        return json(res, 200, { ok: true, produtos_devolvidos: devolvidos, valor_estornado: centavos(estornado) });
       } catch (e) {
         try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
         throw e;

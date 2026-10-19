@@ -59,6 +59,7 @@
       }
     },
     agendarAdmin(dados) { return this._post('admin/agendar', dados); },
+    reagendar(id, data, inicioMin) { return this._post('admin/reagendar', { id, data, inicio_min: inicioMin }); },
 
     async entrar(usuario, senha) { const r = await this._post('admin/login', { usuario, senha }); guardar.set(r.token); },
     async sair() { try { await this._post('admin/logout'); } catch { /* ignora */ } guardar.set(null); },
@@ -73,6 +74,9 @@
     caixaDiario(data) { return this._get('admin/caixa-diario?data=' + data); },
     abrirCaixa(data, valor, observacao) { return this._post('admin/caixa-diario/abrir', { data, valor_abertura: valor, observacao }); },
     fecharCaixa(data, valor) { return this._post('admin/caixa-diario/fechar', { data, valor_contado: valor }); },
+    /** tipo: 'sangria' | 'despesa' | 'reforco' — sempre no caixa de hoje. */
+    movimentoCaixa(tipo, valor, forma, descricao) { return this._post('admin/caixa-movimento', { tipo, valor, forma, descricao }); },
+    excluirMovimentoCaixa(id) { return this._post('admin/caixa-movimento/excluir', { id }); },
     vendasAvulsas(data) { return this._get('admin/vendas-avulsas?data=' + data); },
     vendaAvulsa(itens, forma, clienteId) { return this._post('admin/venda-avulsa', { itens, forma, cliente_id: clienteId || null }); },
     cancelarVendaAvulsa(id) { return this._post('admin/venda-avulsa/cancelar', { id }); },
@@ -84,7 +88,8 @@
     venderProduto(agendamentoId, produtoId, quantidade) { return this._post('admin/venda-produto', { agendamento_id: agendamentoId, produto_id: produtoId, quantidade }); },
     movimentosEstoque(produtoId) { return this._get('admin/movimentos-estoque?produto_id=' + produtoId); },
     agendamentos(de, ate) { return this._get(`admin/agendamentos?de=${de}&ate=${ate}`); },
-    cancelar(id) { return this._post('admin/cancelar', { id }); },
+    /** devolver = true lança estorno do que o cliente já pagou. */
+    cancelar(id, devolver = false) { return this._post('admin/cancelar', { id, devolver }); },
     salvar(tabela, linha) { return this._post('admin/salvar/' + tabela, linha); },
     excluir(tabela, id) { return this._post('admin/excluir/' + tabela, { id }); },
     salvarConfig(obj) { return this._post('admin/config', obj); },
@@ -155,6 +160,7 @@
       return this._rpc('criar_agendamento', { p_data: d.data, p_inicio_min: d.inicio_min, p_servico_ids: d.servico_ids, p_nome: d.nome, p_whatsapp: d.whatsapp });
     },
     agendarAdmin(d) { return this._rpc('criar_agendamento_admin', { p_data: d.data, p_inicio_min: d.inicio_min, p_servico_ids: d.servico_ids, p_nome: d.nome, p_whatsapp: d.whatsapp || '' }); },
+    reagendar(id, data, inicioMin) { return this._rpc('reagendar_agendamento', { p_id: id, p_data: data, p_inicio_min: inicioMin }); },
 
     async entrar(email, senha) {
       const r = await pedir(cfg.supabaseUrl + '/auth/v1/token?grant_type=password', {
@@ -173,15 +179,16 @@
     },
     logado() { return !!guardar.get(); },
     agendamentos(de, ate) {
-      return this._rest(`agendamentos?select=*,clientes(nome,whatsapp),agendamento_servicos(nome,duracao_min,preco),agendamento_produtos(nome,quantidade,preco_unitario,valor_total),recebimentos_agendamento(id,valor,forma,recebido_em)&data=gte.${de}&data=lte.${ate}&order=data,inicio_min`)
-        .then((l) => l.map(({ clientes, agendamento_servicos, agendamento_produtos, recebimentos_agendamento, cliente_id, ...a }) => {
+      return this._rest(`agendamentos?select=*,clientes(nome,whatsapp),agendamento_servicos(nome,duracao_min,preco),agendamento_produtos(nome,quantidade,preco_unitario,valor_total),recebimentos_agendamento(id,valor,forma,recebido_em),estornos(id,valor,forma,criado_em),remarcacoes(id,data_anterior,inicio_anterior,data_nova,inicio_novo,criado_em)&remarcacoes.order=id&data=gte.${de}&data=lte.${ate}&order=data,inicio_min`)
+        .then((l) => l.map(({ clientes, agendamento_servicos, agendamento_produtos, recebimentos_agendamento, estornos: est, remarcacoes, cliente_id, ...a }) => {
           const pagamentos = (recebimentos_agendamento || []).map((p) => ({ ...p, valor: Number(p.valor) }));
+          const estornos = (est || []).map((e) => ({ ...e, valor: Number(e.valor) }));
           const totalPago = Math.round(pagamentos.reduce((s, p) => s + p.valor, 0) * 100) / 100;
           const produtos = (agendamento_produtos || []).map((p) => ({ ...p, preco_unitario: Number(p.preco_unitario), valor_total: Number(p.valor_total) }));
-          return { ...a, valor_ajuste: Number(a.valor_ajuste || 0), valor_produtos: Number(a.valor_produtos || 0), cliente: clientes, servicos: agendamento_servicos, produtos, pagamentos, total_pago: totalPago, saldo_devedor: Math.max(0, Number(a.valor_total || 0) - totalPago) };
+          return { ...a, valor_ajuste: Number(a.valor_ajuste || 0), valor_produtos: Number(a.valor_produtos || 0), cliente: clientes, servicos: agendamento_servicos, produtos, pagamentos, estornos, remarcacoes: remarcacoes || [], total_pago: totalPago, saldo_devedor: Math.max(0, Number(a.valor_total || 0) - totalPago) };
         }));
     },
-    cancelar(id) { return this._rpc('cancelar_agendamento', { p_agendamento_id: id }); },
+    cancelar(id, devolver = false) { return this._rpc('cancelar_agendamento', { p_agendamento_id: id, p_devolver: devolver }); },
     async clientes() {
       const r = await this._rpc('clientes_resumo', {});
       return { ...r, clientes: r.clientes.map((c) => ({ ...c, total_gasto: Number(c.total_gasto) })) };
@@ -253,6 +260,8 @@
     caixaDiario(data) { return this._rpc('caixa_diario_resumo', { p_data: data }); },
     abrirCaixa(data, valor, observacao) { return this._rpc('abrir_caixa_diario', { p_data: data, p_valor_abertura: valor, p_observacao: observacao }); },
     fecharCaixa(data, valor) { return this._rpc('fechar_caixa_diario', { p_data: data, p_valor_contado: valor }); },
+    movimentoCaixa(tipo, valor, forma, descricao) { return this._rpc('registrar_movimento_caixa', { p_tipo: tipo, p_valor: valor, p_forma: forma || 'dinheiro', p_descricao: descricao || '' }); },
+    excluirMovimentoCaixa(id) { return this._rpc('excluir_movimento_caixa', { p_id: id }); },
     vendasAvulsas(data) { return this._rpc('listar_vendas_avulsas', { p_data: data }); },
     vendaAvulsa(itens, forma, clienteId) { return this._rpc('registrar_venda_avulsa', { p_itens: itens, p_forma: forma, p_cliente_id: clienteId || null }); },
     cancelarVendaAvulsa(id) { return this._rpc('cancelar_venda_avulsa', { p_id: id }); },
@@ -343,6 +352,9 @@
         MUITO_LONGE: 'Esta data ainda não está aberta para agendamento.',
         SERVICO_INVALIDO: 'Algum serviço selecionado não está mais disponível. Recomece o agendamento.',
         DADOS_INVALIDOS: 'Confira seu nome e WhatsApp.',
+        MESMO_HORARIO: 'Escolha um horário diferente do atual.',
+        AGENDAMENTO_CANCELADO: 'Este agendamento está cancelado.',
+        AGENDAMENTO_NAO_ENCONTRADO: 'Agendamento não encontrado. Atualize a página.',
         REDE: 'Sem conexão com o servidor. Tente novamente.',
       })[codigo] || 'Não foi possível concluir. Tente novamente.';
     },

@@ -91,8 +91,11 @@
     RECEBIMENTO_INVALIDO: 'Confira o valor e a forma de pagamento.',
     ESTOQUE_INSUFICIENTE: 'Não há estoque suficiente para essa quantidade.',
     CAIXA_JA_ABERTO: 'O caixa deste dia já foi aberto.',
-    CAIXA_JA_FECHADO: 'Este caixa já foi fechado.',
-    CAIXA_NAO_ABERTO: 'Abra o caixa antes de fechá-lo.',
+    CAIXA_JA_FECHADO: 'O caixa de hoje já foi fechado.',
+    CAIXA_NAO_ABERTO: 'Abra o caixa de hoje primeiro.',
+    SALDO_GAVETA_INSUFICIENTE: 'O valor é maior do que deveria haver na gaveta.',
+    DESCRICAO_OBRIGATORIA: 'Diga com o que foi a despesa.',
+    MOVIMENTO_NAO_ENCONTRADO: 'Lançamento não encontrado. Atualize a página.',
     AGENDAMENTO_CANCELADO: 'Este agendamento está cancelado.',
     AGENDAMENTO_PASSADO: 'O horário deste agendamento já passou.',
     AGENDAMENTO_NAO_ENCONTRADO: 'Agendamento não encontrado. Atualize a página.',
@@ -150,22 +153,26 @@
     try { await aoEnviar(); } finally { if (btn) btn.disabled = false; }
   });
 
-  /** Confirmação com texto em um ou mais parágrafos. */
-  function confirma(texto, rotulo = 'Confirmar', perigo = true) {
+  /** Pergunta com texto em um ou mais parágrafos e vários botões; resolve com o `valor` escolhido (null em Voltar). */
+  function escolha(texto, opcoes) {
     return new Promise((ok) => {
       const d = document.createElement('dialog');
-      d.className = 'modal modal--confirma';
+      d.className = 'modal modal--confirma' + (opcoes.length > 1 ? ' modal--escolha' : '');
       d.setAttribute('aria-label', 'Confirmação');
       const paragrafos = (Array.isArray(texto) ? texto : [texto]).filter(Boolean).map((p) => `<p>${esc(p)}</p>`).join('');
       d.innerHTML = `<div class="modal__box"><div class="modal__corpo">${paragrafos}</div>
-        <div class="modal__rodape"><button type="button" class="btn" data-r="0">Voltar</button><button type="button" class="btn ${perigo ? 'btn--perigo' : 'btn--solid'}" data-r="1">${esc(rotulo)}</button></div></div>`;
+        <div class="modal__rodape"><button type="button" class="btn" data-r="">Voltar</button>${opcoes.map((o, i) => `<button type="button" class="btn ${o.classe || ''}" data-r="${i}">${esc(o.rotulo)}</button>`).join('')}</div></div>`;
       document.body.appendChild(d);
       const fim = (v) => { d.close(); d.remove(); ok(v); };
-      d.addEventListener('click', (e) => { const b = e.target.closest('[data-r]'); if (b) fim(b.dataset.r === '1'); });
-      d.addEventListener('cancel', (e) => { e.preventDefault(); fim(false); });
+      d.addEventListener('click', (e) => { const b = e.target.closest('[data-r]'); if (b) fim(b.dataset.r === '' ? null : opcoes[Number(b.dataset.r)].valor); });
+      d.addEventListener('cancel', (e) => { e.preventDefault(); fim(null); });
       d.showModal();
-      $('[data-r="0"]', d).focus();
+      $('[data-r=""]', d).focus();
     });
+  }
+  /** Confirmação com texto em um ou mais parágrafos. */
+  async function confirma(texto, rotulo = 'Confirmar', perigo = true) {
+    return (await escolha(texto, [{ rotulo, classe: perigo ? 'btn--perigo' : 'btn--solid', valor: true }])) === true;
   }
 
   /* upload de imagem (guarda o data URL em memória até salvar) */
@@ -356,7 +363,9 @@
       ajuste ? `<li class="${ajuste < 0 ? 'neg' : 'pos'}"><span>${ajuste < 0 ? 'Desconto' : 'Adicional'}</span><b>${ajuste < 0 ? '− ' : '+ '}${A.fmtBRL(Math.abs(ajuste))}</b></li>` : '',
       `<li class="recibo__total"><span>Total</span><b>${esc(valorAg(a))}</b></li>`,
     ].join('');
-    const pagamentos = (a.pagamentos || []).map((p) => `<li><span>${esc(FORMAS[p.forma] || p.forma)}<small>${esc(quando(p.recebido_em))}</small></span><b>${A.fmtBRL(p.valor)}</b></li>`).join('');
+    const pagamentos = (a.pagamentos || []).map((p) => `<li><span>${esc(FORMAS[p.forma] || p.forma)}<small>${esc(quando(p.recebido_em))}</small></span><b>${A.fmtBRL(p.valor)}</b></li>`).join('')
+      + (a.estornos || []).map((e) => `<li class="neg"><span>Devolvido · ${esc(FORMAS[e.forma] || e.forma)}<small>${esc(quando(e.criado_em))}</small></span><b>− ${A.fmtBRL(e.valor)}</b></li>`).join('');
+    const ficouComBarbearia = !confirmado && pago > 0 && !(a.estornos || []).length;
     const statusLembrete = ultimoLembrete
       ? `Conversa aberta ${esc(quando(ultimoLembrete))}${aberturas > 1 ? ` · ${aberturas} vezes` : ''}`
       : (futuro ? 'Ainda não enviado.' : 'O horário já passou.');
@@ -379,12 +388,15 @@
           <div class="progresso${pct >= 100 ? ' completo' : ''}" role="progressbar" aria-label="Valor pago" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>
           ${pagamentos ? `<ul class="recibo recibo--lista">${pagamentos}</ul>` : '<p class="det-vazio">Nenhum pagamento registrado.</p>'}
           ${confirmado && saldo > 0 ? `<p class="det-falta">Falta receber <strong>${A.fmtBRL(saldo)}</strong></p>` : ''}
+          ${ficouComBarbearia ? `<p class="det-vazio">Cancelado sem devolução: o valor pago ficou com a barbearia.</p>` : ''}
         </section>
         ${confirmado && temWa ? `<section class="det-sec det-lembrete"><div><h3>Lembrete por WhatsApp</h3><p id="lembrete-status">${statusLembrete}</p></div>
           ${lembreteOk ? `<a class="btn btn--sm btn--sec" id="lembrete-link" href="${esc(urlLembrete)}" target="_blank" rel="noopener">${BJIcons.svg('whatsapp')}${aberturas ? 'Reenviar' : 'Enviar'}</a>` : ''}</section>` : ''}
+        ${(a.remarcacoes || []).length ? `<section class="det-sec"><h3>Remarcações</h3><ul class="recibo recibo--lista">${a.remarcacoes.map((r) => `<li><span>${esc(dataCurta(r.data_anterior))} às ${A.fmtMin(r.inicio_anterior)} → ${esc(dataCurta(r.data_nova))} às ${A.fmtMin(r.inicio_novo)}<small>${esc(quando(r.criado_em))}</small></span></li>`).join('')}</ul></section>` : ''}
         <p class="det-meta">${a.criado_em ? `Criado em ${esc(quando(a.criado_em, true))} · ` : ''}Código ${esc(a.codigo)}</p>`,
       rodape: `${confirmado ? '<button type="button" class="btn-texto perigo" id="cancelar-ag">Cancelar horário</button>' : ''}
         <span class="modal__espaco"></span>
+        ${confirmado ? '<button type="button" class="btn btn--sec" id="remarcar-ag"><i data-icon="calendar"></i>Horário</button>' : ''}
         ${confirmado ? '<button type="button" class="btn btn--sec" id="ajuste-ag"><i data-icon="sliders"></i>Ajustar</button>' : ''}
         ${confirmado && temProdutos ? '<button type="button" class="btn btn--sec" id="vender-produto-ag"><i data-icon="box"></i>Produto</button>' : ''}
         ${confirmado && saldo > 0 ? '<button type="button" class="btn btn--solid" id="receber-ag"><i data-icon="wallet"></i>Receber</button>' : ''}
@@ -402,14 +414,31 @@
         const on = (id, fn) => { const b = $('#' + id); if (b) b.addEventListener('click', fn); };
         on('receber-ag', () => formRecebimento(a, saldo, aoMudar));
         on('ajuste-ag', () => formAjuste(a, aoMudar));
+        on('remarcar-ag', () => abrirAgendamentoAdmin(null, () => aoMudar(), a));
         on('vender-produto-ag', () => formVenda(a, aoMudar));
         on('cancelar-ag', async () => {
           const avisos = [`Cancelar o horário de ${nome} em ${A.fmtData(a.data)} às ${A.fmtMin(a.inicio_min)}? O horário volta a ficar livre na agenda.`];
           if ((a.produtos || []).length) avisos.push('Os produtos desta comanda voltam para o estoque.');
-          if (pago > 0) avisos.push(`Já foram recebidos ${A.fmtBRL(pago)}. Esse valor continua registrado no caixa; se for devolver ao cliente, faça a devolução por fora.`);
-          if (!(await confirma(avisos, 'Cancelar agendamento'))) return;
-          const r = await seguro(() => Api.cancelar(a.id));
-          if (r) { fecharModal(); toast(r.produtos_devolvidos ? `Agendamento cancelado. ${plural(r.produtos_devolvidos, 'produto voltou', 'produtos voltaram')} ao estoque.` : 'Agendamento cancelado.'); await recarregar(); aoMudar(); }
+          let devolver = false;
+          if (pago > 0) {
+            const porForma = {};
+            (a.pagamentos || []).forEach((p) => { porForma[p.forma] = centavos((porForma[p.forma] || 0) + p.valor); });
+            const detalhe = Object.entries(porForma).map(([f, v]) => `${FORMAS[f] || f} ${A.fmtBRL(v)}`).join(' · ');
+            avisos.push(`O cliente já pagou ${A.fmtBRL(pago)} (${detalhe}). Se devolver, o valor sai do caixa de hoje na mesma forma em que foi pago. Se não devolver, ele fica com a barbearia (ex.: taxa por falta).`);
+            const r = await escolha(avisos, [
+              { rotulo: 'Cancelar sem devolver', valor: 'manter' },
+              { rotulo: `Cancelar e devolver ${A.fmtBRL(pago)}`, classe: 'btn--perigo', valor: 'devolver' },
+            ]);
+            if (!r) return;
+            devolver = r === 'devolver';
+          } else if (!(await confirma(avisos, 'Cancelar agendamento'))) return;
+          const r = await seguro(() => Api.cancelar(a.id, devolver));
+          if (r) {
+            const partes = ['Agendamento cancelado.'];
+            if (Number(r.valor_estornado) > 0) partes.push(`${A.fmtBRL(r.valor_estornado)} devolvidos ao cliente.`);
+            if (r.produtos_devolvidos) partes.push(`${plural(r.produtos_devolvidos, 'produto voltou', 'produtos voltaram')} ao estoque.`);
+            fecharModal(); toast(partes.join(' ')); await recarregar(); aoMudar();
+          }
         });
       },
     });
@@ -616,31 +645,40 @@
   }
 
   /* ------------------------------------------------- agendamento presencial */
-  async function abrirAgendamentoAdmin(dataInicial, aoCriar) {
+  /** Novo agendamento presencial; com `remarcar` (um agendamento), vira "Mudar horário": só data e horário mudam. */
+  async function abrirAgendamentoAdmin(dataInicial, aoCriar, remarcar = null) {
     const servicos = D.servicos.filter((s) => s.ativo);
     const cacheDia = {}; // data -> agendamentos confirmados do dia
     let inicioSel = null;
     let clientes = [];
-    seguro(() => Api.clientes()).then((r) => {
+    if (!remarcar) seguro(() => Api.clientes()).then((r) => {
       clientes = (r && r.clientes) || [];
       const dl = $('#admin-ag-clientes');
       if (dl) dl.innerHTML = clientes.map((c) => `<option value="${esc(c.nome)}">${c.whatsapp ? esc(fmtTel(c.whatsapp)) : ''}</option>`).join('');
     });
+    const ehAtual = (data, min) => remarcar && data === remarcar.data && min === remarcar.inicio_min;
     abrirModal({
-      titulo: 'Novo agendamento',
-      corpo: `<p class="sub">Para clientes que marcam pelo telefone ou chegam sem horário. Sobrenome e telefone são opcionais.</p>
+      titulo: remarcar ? 'Mudar horário' : 'Novo agendamento',
+      corpo: `${remarcar
+        ? `<p class="sub">${esc(BJ.nome(remarcar.cliente.nome))} · ${remarcar.servicos.map((s) => esc(s.nome)).join(' + ')}. Hoje marcado para <b>${esc(dataCurta(remarcar.data))} às ${A.fmtMin(remarcar.inicio_min)}</b>. Valores, pagamentos e produtos continuam iguais.</p>`
+        : `<p class="sub">Para clientes que marcam pelo telefone ou chegam sem horário. Sobrenome e telefone são opcionais.</p>
         <div class="grade2"><div class="campo"><label for="admin-ag-nome">Nome do cliente</label><input id="admin-ag-nome" maxlength="80" list="admin-ag-clientes" autocomplete="off" required><datalist id="admin-ag-clientes"></datalist></div>
           <div class="campo"><label for="admin-ag-whats">WhatsApp <span class="opcional">opcional</span></label><input id="admin-ag-whats" ${CAMPO_TEL}></div></div>
-        <fieldset class="campo"><legend class="rotulo">Serviços</legend><div class="chips">${servicos.map((s) => `<label class="chip"><input type="checkbox" name="admin-ag-servico" value="${s.id}"><span>${esc(s.nome)}<small>${esc(brl(s.preco))}</small></span></label>`).join('')}</div></fieldset>
-        <div class="campo"><label for="admin-ag-data">Data</label><input id="admin-ag-data" type="date" value="${esc(dataInicial || hojeIso())}" required></div>
-        <fieldset class="campo"><legend class="rotulo">Horário</legend><div id="admin-ag-slots" class="slots-adm-area"></div></fieldset>
+        <fieldset class="campo"><legend class="rotulo">Serviços</legend><div class="chips">${servicos.map((s) => `<label class="chip"><input type="checkbox" name="admin-ag-servico" value="${s.id}"><span>${esc(s.nome)}<small>${esc(brl(s.preco))}</small></span></label>`).join('')}</div></fieldset>`}
+        <div class="campo"><label for="admin-ag-data">${remarcar ? 'Nova data' : 'Data'}</label><input id="admin-ag-data" type="date" value="${esc((remarcar && remarcar.data) || dataInicial || hojeIso())}" required></div>
+        <fieldset class="campo"><legend class="rotulo">${remarcar ? 'Novo horário' : 'Horário'}</legend><div id="admin-ag-slots" class="slots-adm-area"></div></fieldset>
         <div class="previa" id="admin-ag-resumo"><span>Selecione ao menos um serviço</span><strong></strong></div>`,
-      rodape: '<button type="button" class="btn" data-fechar>Cancelar</button><button type="submit" class="btn btn--solid">Criar agendamento</button>',
+      rodape: `<button type="button" class="btn" data-fechar>${remarcar ? 'Voltar' : 'Cancelar'}</button><button type="submit" class="btn btn--solid">${remarcar ? 'Mudar horário' : 'Criar agendamento'}</button>`,
       aberto() {
         const ids = () => $$('input[name="admin-ag-servico"]:checked').map((el) => Number(el.value));
         const resumo = () => {
-          const p = A.calcPricing(ids(), D.servicos, D.combos);
           const box = $('#admin-ag-resumo');
+          if (remarcar) {
+            const novo = inicioSel != null ? `${A.fmtMin(inicioSel)} às ${A.fmtMin(inicioSel + remarcar.duracao_min)}` : 'escolha o novo horário';
+            box.innerHTML = `<span>${A.fmtDur(remarcar.duracao_min)} · ${novo}</span><strong>${esc(valorAg(remarcar))}</strong>`;
+            return;
+          }
+          const p = A.calcPricing(ids(), D.servicos, D.combos);
           if (!ids().length) { box.innerHTML = '<span>Selecione ao menos um serviço</span><strong></strong>'; return; }
           box.innerHTML = `<span>${A.fmtDur(p.duracao)}${inicioSel != null ? ` · ${A.fmtMin(inicioSel)} às ${A.fmtMin(inicioSel + p.duracao)}` : ' · escolha um horário'}${p.economia ? ' · combo aplicado' : ''}</span><strong>${esc(p.consulta ? (p.total ? A.fmtBRL(p.total) + ' + a consultar' : 'A consultar') : A.fmtBRL(p.total))}</strong>`;
         };
@@ -652,19 +690,21 @@
           if (!cacheDia[data]) {
             area.innerHTML = '<p class="slots-adm-msg"><span class="spinner" aria-hidden="true"></span>Carregando horários…</p>';
             const lista = await seguro(() => Api.agendamentos(data, data));
-            cacheDia[data] = (lista || []).filter((a) => a.status === 'confirmado');
+            // ao remarcar, o próprio horário atual não ocupa a agenda
+            cacheDia[data] = (lista || []).filter((a) => a.status === 'confirmado' && !(remarcar && a.id === remarcar.id));
             if ($('#admin-ag-data').value !== data) return; // trocou a data no meio do caminho
           }
           const ags = cacheDia[data];
-          const temServico = ids().length > 0;
+          const temServico = !!remarcar || ids().length > 0;
           const passo = Math.max(5, Number(D.config.passo_min || 20));
-          const duracao = temServico ? A.calcPricing(ids(), D.servicos, D.combos).duracao : passo;
+          const duracao = remarcar ? remarcar.duracao_min : temServico ? A.calcPricing(ids(), D.servicos, D.combos).duracao : passo;
           const slots = A.gerarHorarios({ data, duracao, horarios: D.horarios, config: D.config, bloqueios: D.bloqueios, ocupados: ags.map((a) => ({ ini: a.inicio_min, fim: a.fim_min })) })
             .filter((s) => s.motivo !== 'FORA_DO_EXPEDIENTE');
           const agoraMin = data === hojeIso() ? minAgora() : -1;
-          const livres = slots.filter((s) => s.livre);
+          const livres = slots.filter((s) => s.livre && !ehAtual(data, s.inicio_min));
           if (inicioSel != null && !livres.some((s) => s.inicio_min === inicioSel)) inicioSel = null;
-          if (temServico && inicioSel == null && livres.length) inicioSel = (livres.find((s) => s.inicio_min >= agoraMin) || livres[0]).inicio_min;
+          // ao remarcar, nada vem pré-selecionado: a pessoa escolhe o novo horário
+          if (temServico && !remarcar && inicioSel == null && livres.length) inicioSel = (livres.find((s) => s.inicio_min >= agoraMin) || livres[0]).inicio_min;
           // O que ocupa o início do slot: almoço, bloqueio ou cliente (com o intervalo real). Sem dono = o atendimento "não cabe".
           const almoco = A.almoco(D.config);
           const ocupante = (t) => {
@@ -687,6 +727,9 @@
               return `<div class="slot-adm ocupado bloco" role="note" aria-label="${A.fmtMin(ini)} às ${A.fmtMin(fim)}, ${esc(occ.rot)}"><b>${A.fmtMin(ini)}–${A.fmtMin(fim)}</b><small>${esc(occ.rot)}</small></div>`;
             }
             ultimaChave = null;
+            if (ehAtual(data, s.inicio_min)) {
+              return `<button type="button" class="slot-adm atual" disabled aria-label="${A.fmtMin(s.inicio_min)}, horário atual"><b>${A.fmtMin(s.inicio_min)}</b><small>atual</small></button>`;
+            }
             // começa livre, mas o atendimento inteiro esbarra em algo antes de terminar
             const rot = s.livre ? (passou ? 'já passou' : 'livre') : s.motivo === 'ALMOCO' ? 'invade almoço' : s.motivo === 'BLOQUEADO' ? 'invade bloqueio' : 'não cabe';
             return `<button type="button" class="slot-adm${s.livre ? '' : ' ocupado'}${passou ? ' passou' : ''}${s.inicio_min === inicioSel ? ' sel' : ''}" data-slot="${s.inicio_min}" ${s.livre && temServico ? '' : 'disabled'} aria-pressed="${s.inicio_min === inicioSel}" aria-label="Começar às ${A.fmtMin(s.inicio_min)}, ${esc(rot)}">
@@ -713,9 +756,20 @@
           resumo();
         };
         horarios();
-        $('#admin-ag-nome').focus();
+        $(remarcar ? '#admin-ag-data' : '#admin-ag-nome').focus();
       },
       async enviar() {
+        if (remarcar) {
+          const data = $('#admin-ag-data').value;
+          if (!data || inicioSel == null) return toast('Escolha a nova data e um horário livre.', false);
+          const r = await seguro(() => Api.reagendar(remarcar.id, data, inicioSel));
+          if (!r) return;
+          if (!r.ok) return toast(BJ.mensagemErro(r.erro), false);
+          fecharModal();
+          toast(`Horário de ${BJ.nome(remarcar.cliente.nome).split(' ')[0]} mudado para ${A.fmtData(data)} às ${A.fmtMin(inicioSel)}.${remarcar.lembrete_aberto_em || remarcar.lembrete_enviado_em ? ' Envie o lembrete de novo com o horário novo.' : ''}`);
+          aoCriar(data);
+          return;
+        }
         const nome = BJ.nome($('#admin-ag-nome').value);
         const whatsapp = digitos($('#admin-ag-whats').value);
         const data = $('#admin-ag-data').value;
@@ -827,6 +881,37 @@
 
   /* ==================================================================== Caixa */
   const PERIODOS = { hoje: 'Hoje', semana: 'Semana', mes: 'Mês', ano: 'Ano', total: 'Tudo' };
+  const TIPOS_MOV = { sangria: 'Sangria', despesa: 'Despesa', reforco: 'Reforço' };
+  const AJUDA_MOV = {
+    sangria: 'Dinheiro tirado da gaveta para guardar ou depositar. Não é gasto.',
+    despesa: 'Um gasto da barbearia (fornecedor, lanche, material). Se foi pago em dinheiro, sai da gaveta.',
+    reforco: 'Troco colocado na gaveta durante o dia.',
+  };
+  /** Formulário de sangria, despesa ou reforço no caixa de hoje. */
+  function formMovimentoCaixa(tipo, aoSalvar) {
+    const despesa = tipo === 'despesa';
+    abrirModal({
+      titulo: TIPOS_MOV[tipo],
+      corpo: `<p class="sub">${esc(AJUDA_MOV[tipo])}</p>
+        <div class="grade2"><div class="campo"><label for="mov-valor">Valor</label><div class="campo-moeda"><span>R$</span><input id="mov-valor" inputmode="decimal" autocomplete="off" placeholder="0,00" required></div></div>
+          ${despesa ? `<div class="campo"><label for="mov-forma">Pago com</label><select id="mov-forma">${Object.entries(FORMAS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select></div>` : ''}</div>
+        <div class="campo"><label for="mov-desc">${despesa ? 'Com o que foi' : 'Observação <span class="opcional">opcional</span>'}</label><input id="mov-desc" maxlength="120" placeholder="${despesa ? 'Ex.: lâminas, café, conta de luz' : tipo === 'sangria' ? 'Ex.: depósito no banco' : 'Ex.: troco em moedas'}" ${despesa ? 'required' : ''}></div>`,
+      rodape: `<button type="button" class="btn" data-fechar>Cancelar</button><button type="submit" class="btn btn--solid">Lançar ${esc(TIPOS_MOV[tipo].toLowerCase())}</button>`,
+      aberto() { $('#mov-valor').focus(); },
+      async enviar() {
+        const valor = centavos(numBR($('#mov-valor').value));
+        if (!(valor > 0)) { $('#mov-valor').focus(); return toast('Informe um valor maior que zero.', false); }
+        const descricao = $('#mov-desc').value.trim();
+        if (despesa && !descricao) { $('#mov-desc').focus(); return toast('Diga com o que foi a despesa.', false); }
+        const forma = despesa ? $('#mov-forma').value : 'dinheiro';
+        const r = await seguro(() => Api.movimentoCaixa(tipo, valor, forma, descricao));
+        if (!r) return;
+        fecharModal();
+        toast(`${TIPOS_MOV[tipo]} de ${A.fmtBRL(valor)} ${tipo === 'reforco' ? 'lançado' : 'lançada'}${forma === 'dinheiro' ? '' : ' (fora da gaveta)'}.`);
+        aoSalvar();
+      },
+    });
+  }
   function cartaoCaixaDia(cx, dia) {
     if (cx.status === 'nao_aberto') {
       return `<div class="cartao cartao__pad caixa-dia"><div class="caixa-dia__cab"><div><h2>Caixa do dia</h2><p>${esc(dataCurta(dia))} · informe quanto dinheiro tem na gaveta para começar.</p></div>${pill(['Não aberto', 'muted'])}</div>
@@ -839,15 +924,34 @@
     }
     const aberto = cx.status === 'aberto';
     const dif = Number(cx.diferenca || 0);
+    const reforcos = Number(cx.reforcos || 0);
+    const entradas = centavos(Number(cx.recebido_dinheiro || 0) + reforcos);
+    const saidas = Number(cx.saidas_dinheiro ?? cx.devolvido_dinheiro ?? 0);
+    const movs = cx.movimentos || [];
+    // devoluções vêm dos cancelamentos; aparecem na lista para a conta da gaveta fechar
+    const linhasSaida = [
+      ...movs.map((mv) => `<li class="${mv.tipo === 'reforco' ? 'pos' : 'neg'}"><span>${esc(TIPOS_MOV[mv.tipo])}${mv.descricao ? ' · ' + esc(mv.descricao) : ''}<small>${esc((quando(mv.criado_em).split(' às ')[1]) || '')}${mv.forma !== 'dinheiro' ? ' · ' + esc(FORMAS[mv.forma] || mv.forma) + ' (fora da gaveta)' : ''}</small></span>
+        <b>${mv.tipo === 'reforco' ? '+ ' : '− '}${A.fmtBRL(mv.valor)}</b>${aberto ? `<button type="button" class="icone perigo" data-excluir-mov="${mv.id}" aria-label="Excluir ${esc(TIPOS_MOV[mv.tipo].toLowerCase())} de ${A.fmtBRL(mv.valor)}" title="Excluir">${BJIcons.svg('trash')}</button>` : ''}</li>`),
+      ...(Number(cx.devolvido_dinheiro) > 0 ? [`<li class="neg"><span>Devoluções de cancelamentos<small>em dinheiro</small></span><b>− ${A.fmtBRL(cx.devolvido_dinheiro)}</b></li>`] : []),
+    ].join('');
+    const blocoMovs = `<div class="caixa-movs">
+        ${aberto ? `<div class="caixa-movs__acoes"><span>Lançar na gaveta:</span>
+          <button type="button" class="btn btn--sm btn--sec" data-mov="sangria">Sangria</button>
+          <button type="button" class="btn btn--sm btn--sec" data-mov="despesa">Despesa</button>
+          <button type="button" class="btn btn--sm btn--sec" data-mov="reforco">Reforço</button></div>` : ''}
+        ${linhasSaida ? `<ul class="recibo recibo--lista caixa-movs__lista">${linhasSaida}</ul>` : ''}</div>`;
     return `<div class="cartao cartao__pad caixa-dia"><div class="caixa-dia__cab"><div><h2>Caixa do dia</h2><p>${esc(dataCurta(dia))}${cx.aberto_em ? ` · aberto às ${esc((quando(cx.aberto_em).split(' às ')[1]) || '')}` : ''}${cx.fechado_em ? ` · fechado às ${esc((quando(cx.fechado_em).split(' às ')[1]) || '')}` : ''}</p></div>
         ${pill(aberto ? ['Aberto', 'ok'] : ['Fechado', 'muted'])}</div>
-      <div class="conta">
+      <div class="conta${saidas > 0 ? ' conta--4' : ''}">
         <div><span>Troco inicial</span><b>${A.fmtBRL(cx.valor_abertura)}</b></div>
         <div class="conta__op">+</div>
-        <div><span>Entradas em dinheiro</span><b>${A.fmtBRL(cx.recebido_dinheiro)}</b></div>
+        <div><span>Entradas em dinheiro${reforcos ? ` <small>com ${A.fmtBRL(reforcos)} de reforço</small>` : ''}</span><b>${A.fmtBRL(entradas)}</b></div>
+        ${saidas > 0 ? `<div class="conta__op">−</div>
+        <div><span>Saídas</span><b>${A.fmtBRL(saidas)}</b></div>` : ''}
         <div class="conta__op">=</div>
         <div class="conta__res"><span>Esperado na gaveta</span><b>${A.fmtBRL(cx.valor_esperado)}</b></div>
       </div>
+      ${blocoMovs}
       ${aberto ? `<form id="form-fechar-caixa" class="caixa-form caixa-form--fechar">
           <div class="campo"><label for="caixa-contado">Dinheiro contado na gaveta</label><div class="campo-moeda"><span>R$</span><input id="caixa-contado" inputmode="decimal" autocomplete="off" placeholder="${fmtNum(Number(cx.valor_esperado || 0).toFixed(2))}" required></div>
             <small>Conte as notas e moedas antes de fechar.</small></div>
@@ -874,7 +978,7 @@
           <span class="periodo-faixa">${esc(faixa)}</span></div>
         <div class="kpis">
           ${kpi('Faturamento', A.fmtBRL(p.total), plural(p.agendamentos, 'atendimento', 'atendimentos') + (p.vendas_avulsas ? ' · ' + plural(p.vendas_avulsas, 'venda avulsa', 'vendas avulsas') : ''), 'kpi--destaque')}
-          ${kpi('Recebido', A.fmtBRL(p.recebido), 'Entradas no período')}
+          ${kpi('Recebido', A.fmtBRL(p.recebido), Number(p.devolvido) > 0 ? `Já descontados ${A.fmtBRL(p.devolvido)} devolvidos` : 'Entradas no período')}
           ${kpi('A receber', A.fmtBRL(p.a_receber), 'Dos atendimentos do período', p.a_receber > 0 ? 'kpi--alerta' : '')}
           ${kpi('Ticket médio', A.fmtBRL(p.ticket_medio), 'Por atendimento')}
         </div>
@@ -889,7 +993,9 @@
               <li class="recibo__total"><span>Total</span><b>${A.fmtBRL(p.total)}</b></li></ul>` : vazio('receipt', 'Sem atendimentos neste período')}</div>
           <div class="cartao cartao__pad"><h2>Como recebeu</h2>
             ${p.recebido ? `<div class="barras">${formas.map(([k, v]) => barra(FORMAS[k], Number(v), maxForma, `${A.fmtBRL(v)}<small>${p.recebido ? Math.round((v / p.recebido) * 100) : 0}%</small>`)).join('')}</div>`
-              : vazio('wallet', 'Nenhum pagamento registrado', 'Registre os pagamentos no detalhe de cada agendamento.')}</div>
+              : vazio('wallet', 'Nenhum pagamento registrado', 'Registre os pagamentos no detalhe de cada agendamento.')}
+            ${Number(p.despesas) > 0 ? `<ul class="recibo caixa-saldo"><li class="neg"><span>Despesas do período</span><b>− ${A.fmtBRL(p.despesas)}</b></li>
+              <li class="recibo__total"><span>Saldo (recebido − despesas)</span><b>${A.fmtBRL(p.saldo)}</b></li></ul>` : ''}</div>
         </div>
         <div class="cartao cartao__pad"><h2>Serviços mais vendidos</h2>
           ${top.length ? `<div class="barras barras--ranking">${top.map((s, i) => barra(`<i class="pos-rank">${i + 1}</i>${esc(s.nome)}`, s.quantidade, maxTop, `${s.quantidade}×<small>${A.fmtBRL(s.valor)}</small>`, i === 0 ? 'barra--top' : '')).join('')}</div>`
@@ -901,6 +1007,15 @@
     render();
     c.onclick = async (e) => {
       if (e.target.closest('[data-venda-avulsa]')) return formVendaAvulsa(() => refazer());
+      const mov = e.target.closest('[data-mov]');
+      if (mov) return formMovimentoCaixa(mov.dataset.mov, () => refazer());
+      const ex = e.target.closest('[data-excluir-mov]');
+      if (ex) {
+        const mv = (caixaDia.movimentos || []).find((x) => x.id === Number(ex.dataset.excluirMov));
+        if (!mv || !(await confirma(`Excluir ${TIPOS_MOV[mv.tipo].toLowerCase()} de ${A.fmtBRL(mv.valor)}${mv.descricao ? ` (${mv.descricao})` : ''}? A conta da gaveta é refeita.`, 'Excluir'))) return;
+        if (await seguro(() => Api.excluirMovimentoCaixa(mv.id))) { toast('Lançamento excluído.'); refazer(); }
+        return;
+      }
       const cv = e.target.closest('[data-cancelar-venda]');
       if (cv) {
         const v = vendas.find((x) => x.id === Number(cv.dataset.cancelarVenda));

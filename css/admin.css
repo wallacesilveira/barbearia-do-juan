@@ -94,6 +94,8 @@ body.admin {
 .slot-adm.sel { border-color: var(--gold); background: var(--gold-soft); }
 .slot-adm.sel small { color: var(--gold-2); }
 .slot-adm.passou small { color: var(--dim); }
+.slot-adm.atual { border-color: rgba(201, 166, 107, .5); border-style: dashed; background: transparent; }
+.slot-adm.atual small { color: var(--gold-2); }
 .slot-adm.ocupado { border-style: dashed; background: transparent; cursor: not-allowed; }
 .slot-adm.ocupado b { color: var(--dim); text-decoration: line-through; }
 .slot-adm.ocupado small { color: var(--muted); }
@@ -308,6 +310,15 @@ a.aviso-barra:hover { border-color: var(--gold); }
 .caixa-form .btn { min-height: 44px; margin-top: 24px; }
 .caixa-form--fechar { grid-template-columns: minmax(0, 320px) auto; justify-content: start; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
 .conta { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: center; gap: 10px; }
+.conta--4 { grid-template-columns: 1fr auto 1fr auto 1fr auto 1fr; }
+.conta span small { color: var(--dim); font-size: 11px; }
+.caixa-movs { margin-top: 14px; }
+.caixa-movs__acoes { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.caixa-movs__acoes > span { color: var(--muted); font-size: 12.5px; margin-right: 2px; }
+.caixa-movs__lista { margin-top: 10px; }
+.caixa-movs__lista li { align-items: center; gap: 10px; }
+.caixa-movs__lista li > b { margin-left: auto; }
+.caixa-saldo { margin-top: 14px; }
 .conta > div:not(.conta__op) { display: flex; flex-direction: column; gap: 3px; padding: 12px 14px; border-radius: 10px; background: var(--surface-2); }
 .conta span { color: var(--muted); font-size: 12px; }
 .conta b { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -564,6 +575,10 @@ a.aviso-barra:hover { border-color: var(--gold); }
   .modal__rodape > .btn--solid:last-child { flex-basis: 100%; order: -1; }
   .modal__rodape > .btn-texto { order: 10; flex-basis: 100%; }
   .modal__espaco { display: none; }
+  /* várias opções: uma por linha, a principal no topo e Voltar por último */
+  .modal--escolha .modal__rodape > .btn { flex-basis: 100%; }
+  .modal--escolha .modal__rodape > .btn:last-child { order: -1; }
+  .modal--escolha .modal__rodape > .btn[data-r=""] { order: 10; }
   .aviso-barra { flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) {

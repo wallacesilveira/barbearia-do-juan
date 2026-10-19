@@ -175,6 +175,40 @@ create table if not exists vendas_avulsas_itens (
 );
 create index if not exists idx_vendas_avulsas_itens on vendas_avulsas_itens (venda_id, id);
 
+-- Estornos: devolução ao cliente quando um agendamento já pago é cancelado.
+create table if not exists estornos (
+  id bigint generated always as identity primary key,
+  agendamento_id bigint not null references agendamentos(id) on delete cascade,
+  valor numeric(10,2) not null check (valor > 0),
+  forma text not null check (forma in ('dinheiro','pix','cartao','outro')),
+  criado_em timestamptz not null default now()
+);
+create index if not exists idx_estornos_ag on estornos (agendamento_id);
+
+-- Remarcações: histórico de mudanças de data/horário de um agendamento.
+create table if not exists remarcacoes (
+  id bigint generated always as identity primary key,
+  agendamento_id bigint not null references agendamentos(id) on delete cascade,
+  data_anterior date not null,
+  inicio_anterior int not null,
+  data_nova date not null,
+  inicio_novo int not null,
+  criado_em timestamptz not null default now()
+);
+create index if not exists idx_remarcacoes_ag on remarcacoes (agendamento_id);
+
+-- Movimentos do caixa do dia: sangria, despesa e reforço de troco.
+create table if not exists movimentos_caixa (
+  id bigint generated always as identity primary key,
+  data date not null default (now() at time zone 'America/Sao_Paulo')::date,
+  tipo text not null check (tipo in ('sangria','despesa','reforco')),
+  valor numeric(10,2) not null check (valor > 0),
+  forma text not null default 'dinheiro' check (forma in ('dinheiro','pix','cartao','outro')),
+  descricao text not null default '',
+  criado_em timestamptz not null default now()
+);
+create index if not exists idx_movimentos_caixa_data on movimentos_caixa (data);
+
 
 -- Alertas do painel (novo agendamento pelo site, estoque baixo).
 create table if not exists alertas (
@@ -227,6 +261,24 @@ drop policy if exists adm_vendas_avulsas_itens on vendas_avulsas_itens;
 create policy adm_vendas_avulsas_itens on vendas_avulsas_itens for all using (is_admin()) with check (is_admin());
 grant select, insert, update, delete on vendas_avulsas, vendas_avulsas_itens to authenticated;
 revoke all on vendas_avulsas, vendas_avulsas_itens from anon;
+
+alter table estornos enable row level security;
+drop policy if exists adm_estornos on estornos;
+create policy adm_estornos on estornos for all using (is_admin()) with check (is_admin());
+grant select, insert, update, delete on estornos to authenticated;
+revoke all on estornos from anon;
+
+alter table remarcacoes enable row level security;
+drop policy if exists adm_remarcacoes on remarcacoes;
+create policy adm_remarcacoes on remarcacoes for all using (is_admin()) with check (is_admin());
+grant select, insert, update, delete on remarcacoes to authenticated;
+revoke all on remarcacoes from anon;
+
+alter table movimentos_caixa enable row level security;
+drop policy if exists adm_movimentos_caixa on movimentos_caixa;
+create policy adm_movimentos_caixa on movimentos_caixa for all using (is_admin()) with check (is_admin());
+grant select, insert, update, delete on movimentos_caixa to authenticated;
+revoke all on movimentos_caixa from anon;
 
 
 -- Público (site): só leitura do que o cliente precisa ver.
@@ -526,6 +578,9 @@ declare
   v_p record;
   v_r record;
   v_av record;
+  v_es record;
+  v_despesas numeric(10,2);
+  v_recebido numeric(10,2);
   v_resumo jsonb := '{}'::jsonb;
   v_formas jsonb;
   v_ranking jsonb;
@@ -561,14 +616,28 @@ begin
       from vendas_avulsas
      where status = 'ativa' and data between v_p.de and v_p.ate;
 
+    -- devoluções de agendamentos cancelados saem da forma em que o cliente pagou
+    select coalesce(sum(valor), 0) as total,
+           coalesce(sum(valor) filter (where forma = 'dinheiro'), 0) as dinheiro,
+           coalesce(sum(valor) filter (where forma = 'pix'), 0) as pix,
+           coalesce(sum(valor) filter (where forma = 'cartao'), 0) as cartao,
+           coalesce(sum(valor) filter (where forma = 'outro'), 0) as outro
+      into v_es
+      from estornos
+     where timezone('America/Sao_Paulo', criado_em)::date between v_p.de and v_p.ate;
+
     select jsonb_build_object(
-             'dinheiro', coalesce(sum(valor) filter (where forma = 'dinheiro'), 0) + v_av.dinheiro,
-             'pix', coalesce(sum(valor) filter (where forma = 'pix'), 0) + v_av.pix,
-             'cartao', coalesce(sum(valor) filter (where forma = 'cartao'), 0) + v_av.cartao,
-             'outro', coalesce(sum(valor) filter (where forma = 'outro'), 0) + v_av.outro)
+             'dinheiro', coalesce(sum(valor) filter (where forma = 'dinheiro'), 0) + v_av.dinheiro - v_es.dinheiro,
+             'pix', coalesce(sum(valor) filter (where forma = 'pix'), 0) + v_av.pix - v_es.pix,
+             'cartao', coalesce(sum(valor) filter (where forma = 'cartao'), 0) + v_av.cartao - v_es.cartao,
+             'outro', coalesce(sum(valor) filter (where forma = 'outro'), 0) + v_av.outro - v_es.outro)
       into v_formas
       from recebimentos_agendamento
      where timezone('America/Sao_Paulo', recebido_em)::date between v_p.de and v_p.ate;
+    v_recebido := (v_formas->>'dinheiro')::numeric + (v_formas->>'pix')::numeric + (v_formas->>'cartao')::numeric + (v_formas->>'outro')::numeric;
+
+    select coalesce(sum(valor), 0) into v_despesas
+      from movimentos_caixa where tipo = 'despesa' and data between v_p.de and v_p.ate;
 
     select coalesce(jsonb_agg(jsonb_build_object('nome', x.nome, 'quantidade', x.quantidade, 'valor', x.valor)
                     order by x.quantidade desc, x.nome), '[]'::jsonb)
@@ -585,7 +654,10 @@ begin
       'adicionais', v_r.adicionais, 'descontos', v_r.descontos, 'total', v_r.total + v_av.total,
       'a_receber', greatest(v_r.total - v_r.pago, 0),
       'ticket_medio', case when v_r.agendamentos > 0 then round(v_r.total / v_r.agendamentos, 2) else 0 end,
-      'recebido', (v_formas->>'dinheiro')::numeric + (v_formas->>'pix')::numeric + (v_formas->>'cartao')::numeric + (v_formas->>'outro')::numeric,
+      'recebido', v_recebido,
+      'devolvido', v_es.total,
+      'despesas', v_despesas,
+      'saldo', v_recebido - v_despesas,
       'por_forma', v_formas,
       'servicos_mais_vendidos', v_ranking));
   end loop;
@@ -742,20 +814,14 @@ create or replace function public.caixa_diario_resumo(p_data date) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare
   v_caixa caixas_diarios%rowtype;
-  v_recebido numeric(10,2);
-  v_esperado numeric(10,2);
 begin
   if not public.is_admin() then raise exception 'NAO_AUTORIZADO' using errcode = '42501'; end if;
   if p_data is null then raise exception 'DATA_INVALIDA' using errcode = '22023'; end if;
   select * into v_caixa from caixas_diarios where data = p_data;
-  v_recebido := public.dinheiro_do_dia(p_data);
-  if v_caixa.data is not null then v_esperado := v_caixa.valor_abertura + v_recebido; end if;
-  return jsonb_build_object(
+  return public.conta_gaveta(p_data) || jsonb_build_object(
     'data', p_data,
     'status', coalesce(v_caixa.status, 'nao_aberto'),
     'valor_abertura', v_caixa.valor_abertura,
-    'recebido_dinheiro', v_recebido,
-    'valor_esperado', v_esperado,
     'valor_contado', v_caixa.valor_contado,
     'diferenca', v_caixa.diferenca,
     'observacao', coalesce(v_caixa.observacao, ''),
@@ -793,7 +859,7 @@ begin
   select * into v_caixa from caixas_diarios where data = p_data for update;
   if not found then raise exception 'CAIXA_NAO_ABERTO' using errcode = 'P0002'; end if;
   if v_caixa.status <> 'aberto' then raise exception 'CAIXA_JA_FECHADO' using errcode = '23505'; end if;
-  v_esperado := v_caixa.valor_abertura + public.dinheiro_do_dia(p_data);
+  v_esperado := (public.conta_gaveta(p_data)->>'valor_esperado')::numeric;
   update caixas_diarios
      set valor_contado = round(p_valor_contado, 2), diferenca = round(p_valor_contado, 2) - v_esperado,
          status = 'fechado', fechado_em = now()
@@ -851,18 +917,31 @@ revoke all on function public.registrar_abertura_lembrete(bigint) from public;
 grant execute on function public.registrar_abertura_lembrete(bigint) to authenticated;
 
 -- Cancela e devolve ao estoque os produtos vendidos na comanda.
-create or replace function public.cancelar_agendamento(p_agendamento_id bigint) returns jsonb
+-- p_devolver = true: devolve ao cliente o que ele pagou (um estorno por forma, no caixa de hoje).
+drop function if exists public.cancelar_agendamento(bigint);
+create or replace function public.cancelar_agendamento(p_agendamento_id bigint, p_devolver boolean default false) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare
   v_ag agendamentos%rowtype;
   v_it record;
   v_devolvidos int := 0;
+  v_estornado numeric(10,2) := 0;
 begin
   if not public.is_admin() then raise exception 'NAO_AUTORIZADO' using errcode = '42501'; end if;
   select * into v_ag from agendamentos where id = p_agendamento_id for update;
   if not found then raise exception 'AGENDAMENTO_NAO_ENCONTRADO' using errcode = 'P0002'; end if;
   if v_ag.status = 'confirmado' then
     update agendamentos set status = 'cancelado' where id = p_agendamento_id;
+    if coalesce(p_devolver, false) then
+      if exists (select 1 from recebimentos_agendamento where agendamento_id = p_agendamento_id and forma = 'dinheiro')
+         and exists (select 1 from caixas_diarios where data = (now() at time zone 'America/Sao_Paulo')::date and status = 'fechado') then
+        raise exception 'CAIXA_JA_FECHADO' using errcode = '23505';
+      end if;
+      insert into estornos (agendamento_id, valor, forma)
+        select p_agendamento_id, sum(valor), forma from recebimentos_agendamento
+         where agendamento_id = p_agendamento_id group by forma;
+      select coalesce(sum(valor), 0) into v_estornado from estornos where agendamento_id = p_agendamento_id;
+    end if;
     for v_it in select produto_id, quantidade from agendamento_produtos where agendamento_id = p_agendamento_id and produto_id is not null loop
       update produtos set estoque = estoque + v_it.quantidade where id = v_it.produto_id;
       insert into movimentos_estoque (produto_id, quantidade, tipo, motivo, agendamento_id)
@@ -870,11 +949,69 @@ begin
       v_devolvidos := v_devolvidos + v_it.quantidade;
     end loop;
   end if;
-  return jsonb_build_object('ok', true, 'produtos_devolvidos', v_devolvidos);
+  return jsonb_build_object('ok', true, 'produtos_devolvidos', v_devolvidos, 'valor_estornado', v_estornado);
 end;
 $$;
-revoke all on function public.cancelar_agendamento(bigint) from public;
-grant execute on function public.cancelar_agendamento(bigint) to authenticated;
+revoke all on function public.cancelar_agendamento(bigint, boolean) from public;
+grant execute on function public.cancelar_agendamento(bigint, boolean) to authenticated;
+
+-- Muda data/horário mantendo serviços, valores, pagamentos e produtos. Mesmas regras do agendamento pelo painel.
+create or replace function public.reagendar_agendamento(p_id bigint, p_data date, p_inicio_min int) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  v_ag agendamentos%rowtype;
+  h record;
+  v_cfg jsonb;
+  v_fim int;
+  v_al_ini int; v_al_fim int;
+begin
+  if not public.is_admin() then raise exception 'NAO_AUTORIZADO' using errcode = '42501'; end if;
+  if p_id is null or p_data is null or p_inicio_min is null then
+    return jsonb_build_object('ok', false, 'erro', 'DADOS_INVALIDOS');
+  end if;
+  perform pg_advisory_xact_lock(hashtext('agendamento:' || p_data::text));
+  select * into v_ag from agendamentos where id = p_id for update;
+  if not found then return jsonb_build_object('ok', false, 'erro', 'AGENDAMENTO_NAO_ENCONTRADO'); end if;
+  if v_ag.status <> 'confirmado' then return jsonb_build_object('ok', false, 'erro', 'AGENDAMENTO_CANCELADO'); end if;
+  if v_ag.data = p_data and v_ag.inicio_min = p_inicio_min then return jsonb_build_object('ok', false, 'erro', 'MESMO_HORARIO'); end if;
+  v_fim := p_inicio_min + v_ag.duracao_min;
+
+  select coalesce(jsonb_object_agg(chave, valor), '{}') into v_cfg from configuracoes;
+  select * into h from horarios_funcionamento where dia_semana = extract(dow from p_data)::int;
+  if not found or not h.ativo then return jsonb_build_object('ok', false, 'erro', 'FECHADO'); end if;
+  if p_inicio_min < h.inicio_min or v_fim > h.fim_min then
+    return jsonb_build_object('ok', false, 'erro', 'FORA_DO_EXPEDIENTE');
+  end if;
+  if coalesce(v_cfg->>'almoco_ativo', '0') = '1' then
+    v_al_ini := split_part(v_cfg->>'almoco_inicio', ':', 1)::int * 60 + split_part(v_cfg->>'almoco_inicio', ':', 2)::int;
+    v_al_fim := split_part(v_cfg->>'almoco_fim', ':', 1)::int * 60 + split_part(v_cfg->>'almoco_fim', ':', 2)::int;
+    if p_inicio_min < v_al_fim and v_al_ini < v_fim then return jsonb_build_object('ok', false, 'erro', 'ALMOCO'); end if;
+  end if;
+  if exists (select 1 from bloqueios where data = p_data and p_inicio_min < fim_min and inicio_min < v_fim) then
+    return jsonb_build_object('ok', false, 'erro', 'BLOQUEADO');
+  end if;
+  -- o próprio horário atual não conta como ocupado
+  if exists (select 1 from agendamentos where data = p_data and status = 'confirmado' and id <> p_id
+              and p_inicio_min < fim_min and inicio_min < v_fim) then
+    return jsonb_build_object('ok', false, 'erro', 'HORARIO_OCUPADO');
+  end if;
+
+  begin
+    insert into remarcacoes (agendamento_id, data_anterior, inicio_anterior, data_nova, inicio_novo)
+      values (p_id, v_ag.data, v_ag.inicio_min, p_data, p_inicio_min);
+    -- o lembrete enviado era do horário antigo: volta a "não enviado"
+    update agendamentos
+       set data = p_data, inicio_min = p_inicio_min, fim_min = v_fim,
+           lembrete_enviado_em = null, lembrete_envios = 0, lembrete_aberto_em = null, lembrete_aberturas = 0
+     where id = p_id returning * into v_ag;
+  exception when exclusion_violation then
+    return jsonb_build_object('ok', false, 'erro', 'HORARIO_OCUPADO');
+  end;
+  return jsonb_build_object('ok', true, 'agendamento', to_jsonb(v_ag));
+end;
+$$;
+revoke all on function public.reagendar_agendamento(bigint, date, int) from public, anon;
+grant execute on function public.reagendar_agendamento(bigint, date, int) to authenticated;
 
 -- Clientes: visita = agendamento confirmado cuja data já chegou. Inclui movimento por dia da semana.
 create or replace function public.clientes_resumo() returns jsonb
@@ -907,35 +1044,124 @@ grant execute on function public.clientes_resumo() to authenticated;
 -- ------------------------------------------------------------ vendas avulsas
 -- Dinheiro que entrou na gaveta no dia: pagamentos de comandas + vendas avulsas.
 create or replace function public.dinheiro_do_dia(p_data date) returns numeric
-language sql security definer stable set search_path = public as $
+language sql security definer stable set search_path = public as $$
   select coalesce((select sum(valor) from recebimentos_agendamento
                     where forma = 'dinheiro' and timezone('America/Sao_Paulo', recebido_em)::date = p_data), 0)
        + coalesce((select sum(valor_total) from vendas_avulsas
                     where forma = 'dinheiro' and status = 'ativa' and data = p_data), 0);
-$;
+$$;
 revoke all on function public.dinheiro_do_dia(date) from public, anon, authenticated;
 
+-- Dinheiro devolvido da gaveta no dia.
+create or replace function public.devolvido_do_dia(p_data date) returns numeric
+language sql security definer stable set search_path = public as $$
+  select coalesce(sum(valor), 0) from estornos
+   where forma = 'dinheiro' and timezone('America/Sao_Paulo', criado_em)::date = p_data;
+$$;
+revoke all on function public.devolvido_do_dia(date) from public, anon, authenticated;
+
+-- Conta da gaveta: troco + entradas em dinheiro + reforços − devoluções − sangrias − despesas em dinheiro.
+create or replace function public.conta_gaveta(p_data date) returns jsonb
+language plpgsql security definer stable set search_path = public as $$
+declare
+  v_abertura numeric(10,2);
+  v_recebido numeric(10,2) := public.dinheiro_do_dia(p_data);
+  v_devolvido numeric(10,2) := public.devolvido_do_dia(p_data);
+  v_sangrias numeric(10,2);
+  v_despesas numeric(10,2);
+  v_reforcos numeric(10,2);
+  v_movs jsonb;
+begin
+  select valor_abertura into v_abertura from caixas_diarios where data = p_data;
+  select coalesce(sum(valor) filter (where tipo = 'sangria'), 0),
+         coalesce(sum(valor) filter (where tipo = 'despesa' and forma = 'dinheiro'), 0),
+         coalesce(sum(valor) filter (where tipo = 'reforco'), 0),
+         coalesce(jsonb_agg(jsonb_build_object('id', id, 'tipo', tipo, 'valor', valor, 'forma', forma,
+                                               'descricao', descricao, 'criado_em', criado_em) order by id), '[]'::jsonb)
+    into v_sangrias, v_despesas, v_reforcos, v_movs
+    from movimentos_caixa where data = p_data;
+  return jsonb_build_object(
+    'recebido_dinheiro', v_recebido,
+    'devolvido_dinheiro', v_devolvido,
+    'sangrias', v_sangrias,
+    'despesas_dinheiro', v_despesas,
+    'reforcos', v_reforcos,
+    'saidas_dinheiro', v_devolvido + v_sangrias + v_despesas,
+    'valor_esperado', v_abertura + v_recebido + v_reforcos - v_devolvido - v_sangrias - v_despesas,
+    'movimentos', v_movs);
+end;
+$$;
+revoke all on function public.conta_gaveta(date) from public, anon, authenticated;
+
+-- Lança sangria, despesa ou reforço no caixa de hoje.
+create or replace function public.registrar_movimento_caixa(p_tipo text, p_valor numeric, p_forma text default 'dinheiro', p_descricao text default '') returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  v_hoje date := (now() at time zone 'America/Sao_Paulo')::date;
+  v_forma text := case when p_tipo = 'despesa' then coalesce(p_forma, 'dinheiro') else 'dinheiro' end;
+  v_desc text := left(btrim(coalesce(p_descricao, '')), 120);
+  v_caixa caixas_diarios%rowtype;
+begin
+  if not public.is_admin() then raise exception 'NAO_AUTORIZADO' using errcode = '42501'; end if;
+  if p_tipo is null or p_tipo not in ('sangria','despesa','reforco') or v_forma not in ('dinheiro','pix','cartao','outro')
+     or p_valor is null or p_valor <= 0 or p_valor <> round(p_valor, 2) then
+    raise exception 'DADOS_INVALIDOS' using errcode = '22023';
+  end if;
+  if p_tipo = 'despesa' and v_desc = '' then raise exception 'DESCRICAO_OBRIGATORIA' using errcode = '22023'; end if;
+  if v_forma = 'dinheiro' then
+    select * into v_caixa from caixas_diarios where data = v_hoje for update;
+    if not found then raise exception 'CAIXA_NAO_ABERTO' using errcode = 'P0002'; end if;
+    if v_caixa.status = 'fechado' then raise exception 'CAIXA_JA_FECHADO' using errcode = '23505'; end if;
+    if p_tipo <> 'reforco' and p_valor > (public.conta_gaveta(v_hoje)->>'valor_esperado')::numeric then
+      raise exception 'SALDO_GAVETA_INSUFICIENTE' using errcode = '22023';
+    end if;
+  end if;
+  insert into movimentos_caixa (data, tipo, valor, forma, descricao) values (v_hoje, p_tipo, p_valor, v_forma, v_desc);
+  return public.caixa_diario_resumo(v_hoje);
+end;
+$$;
+
+create or replace function public.excluir_movimento_caixa(p_id bigint) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  v_mv movimentos_caixa%rowtype;
+begin
+  if not public.is_admin() then raise exception 'NAO_AUTORIZADO' using errcode = '42501'; end if;
+  select * into v_mv from movimentos_caixa where id = p_id for update;
+  if not found then raise exception 'MOVIMENTO_NAO_ENCONTRADO' using errcode = 'P0002'; end if;
+  if exists (select 1 from caixas_diarios where data = v_mv.data and status = 'fechado') then
+    raise exception 'CAIXA_JA_FECHADO' using errcode = '23505';
+  end if;
+  delete from movimentos_caixa where id = p_id;
+  return public.caixa_diario_resumo(v_mv.data);
+end;
+$$;
+revoke all on function public.registrar_movimento_caixa(text, numeric, text, text) from public, anon;
+revoke all on function public.excluir_movimento_caixa(bigint) from public, anon;
+grant execute on function public.registrar_movimento_caixa(text, numeric, text, text) to authenticated;
+grant execute on function public.excluir_movimento_caixa(bigint) to authenticated;
+
 create or replace function public.venda_avulsa_json(p_id bigint) returns jsonb
-language sql security definer stable set search_path = public as $
+language sql security definer stable set search_path = public as $$
   select to_jsonb(v) || jsonb_build_object('itens', coalesce((
            select jsonb_agg(jsonb_build_object('produto_id', i.produto_id, 'nome', i.nome, 'quantidade', i.quantidade,
                                                'preco_unitario', i.preco_unitario, 'valor_total', i.valor_total) order by i.id)
              from vendas_avulsas_itens i where i.venda_id = v.id), '[]'::jsonb))
     from vendas_avulsas v where v.id = p_id;
-$;
+$$;
 revoke all on function public.venda_avulsa_json(bigint) from public, anon, authenticated;
 
 create or replace function public.listar_vendas_avulsas(p_data date) returns jsonb
-language plpgsql security definer stable set search_path = public as $
+language plpgsql security definer stable set search_path = public as $$
 begin
   if not public.is_admin() then raise exception 'NAO_AUTORIZADO' using errcode = '42501'; end if;
   return coalesce((select jsonb_agg(public.venda_avulsa_json(id) order by id desc) from vendas_avulsas where data = p_data), '[]'::jsonb);
 end;
-$;
+$$;
 
 -- p_itens: [{"produto_id": 1, "quantidade": 2}, ...]
 create or replace function public.registrar_venda_avulsa(p_itens jsonb, p_forma text, p_cliente_id bigint default null) returns jsonb
-language plpgsql security definer set search_path = public as $
+language plpgsql security definer set search_path = public as $$
 declare
   v_cliente clientes%rowtype;
   v_item record;
@@ -977,10 +1203,10 @@ begin
   update vendas_avulsas set valor_total = v_total where id = v_venda_id;
   return public.venda_avulsa_json(v_venda_id);
 end;
-$;
+$$;
 
 create or replace function public.cancelar_venda_avulsa(p_id bigint) returns jsonb
-language plpgsql security definer set search_path = public as $
+language plpgsql security definer set search_path = public as $$
 declare
   v_venda vendas_avulsas%rowtype;
   v_item record;
@@ -1002,7 +1228,7 @@ begin
   end loop;
   return jsonb_build_object('ok', true, 'produtos_devolvidos', v_devolvidos);
 end;
-$;
+$$;
 revoke all on function public.listar_vendas_avulsas(date) from public, anon;
 revoke all on function public.registrar_venda_avulsa(jsonb, text, bigint) from public, anon;
 revoke all on function public.cancelar_venda_avulsa(bigint) from public, anon;
