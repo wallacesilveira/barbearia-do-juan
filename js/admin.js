@@ -396,8 +396,8 @@
         <p class="det-meta">${a.criado_em ? `Criado em ${esc(quando(a.criado_em, true))} · ` : ''}Código ${esc(a.codigo)}</p>`,
       rodape: `${confirmado ? '<button type="button" class="btn-texto perigo" id="cancelar-ag">Cancelar horário</button>' : ''}
         <span class="modal__espaco"></span>
-        ${confirmado ? '<button type="button" class="btn btn--sec" id="remarcar-ag"><i data-icon="calendar"></i>Horário</button>' : ''}
-        ${confirmado ? '<button type="button" class="btn btn--sec" id="ajuste-ag"><i data-icon="sliders"></i>Ajustar</button>' : ''}
+        ${confirmado ? '<button type="button" class="btn btn--sec" id="remarcar-ag"><i data-icon="calendar"></i>Reagendar</button>' : ''}
+        ${confirmado ? '<button type="button" class="btn btn--sec" id="ajuste-ag"><i data-icon="sliders"></i>Ajustar valor</button>' : ''}
         ${confirmado && temProdutos ? '<button type="button" class="btn btn--sec" id="vender-produto-ag"><i data-icon="box"></i>Produto</button>' : ''}
         ${confirmado && saldo > 0 ? '<button type="button" class="btn btn--solid" id="receber-ag"><i data-icon="wallet"></i>Receber</button>' : ''}
         ${!confirmado ? '<button type="button" class="btn" data-fechar>Fechar</button>' : ''}`,
@@ -658,7 +658,7 @@
     });
     const ehAtual = (data, min) => remarcar && data === remarcar.data && min === remarcar.inicio_min;
     abrirModal({
-      titulo: remarcar ? 'Mudar horário' : 'Novo agendamento',
+      titulo: remarcar ? 'Reagendar' : 'Novo agendamento',
       corpo: `${remarcar
         ? `<p class="sub">${esc(BJ.nome(remarcar.cliente.nome))} · ${remarcar.servicos.map((s) => esc(s.nome)).join(' + ')}. Hoje marcado para <b>${esc(dataCurta(remarcar.data))} às ${A.fmtMin(remarcar.inicio_min)}</b>. Valores, pagamentos e produtos continuam iguais.</p>`
         : `<p class="sub">Para clientes que marcam pelo telefone ou chegam sem horário. Sobrenome e telefone são opcionais.</p>
@@ -668,7 +668,7 @@
         <div class="campo"><label for="admin-ag-data">${remarcar ? 'Nova data' : 'Data'}</label><input id="admin-ag-data" type="date" value="${esc((remarcar && remarcar.data) || dataInicial || hojeIso())}" required></div>
         <fieldset class="campo"><legend class="rotulo">${remarcar ? 'Novo horário' : 'Horário'}</legend><div id="admin-ag-slots" class="slots-adm-area"></div></fieldset>
         <div class="previa" id="admin-ag-resumo"><span>Selecione ao menos um serviço</span><strong></strong></div>`,
-      rodape: `<button type="button" class="btn" data-fechar>${remarcar ? 'Voltar' : 'Cancelar'}</button><button type="submit" class="btn btn--solid">${remarcar ? 'Mudar horário' : 'Criar agendamento'}</button>`,
+      rodape: `<button type="button" class="btn" data-fechar>${remarcar ? 'Voltar' : 'Cancelar'}</button><button type="submit" class="btn btn--solid">${remarcar ? 'Reagendar' : 'Criar agendamento'}</button>`,
       aberto() {
         const ids = () => $$('input[name="admin-ag-servico"]:checked').map((el) => Number(el.value));
         const resumo = () => {
