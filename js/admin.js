@@ -9,7 +9,7 @@
   let D = { config: {}, servicos: [], produtos: [], combos: [], horarios: [], galeria: [], bloqueios: [] };
   const S = {
     dia: null, mes: null, diaAg: null, mostrarCancelados: false, mostrarPassados: false, ag: new Map(),
-    periodo: 'hoje', buscaCli: '', ordemCli: 'visitas', limiteCli: 30, diasSumido: 45, todosSumidos: false,
+    periodo: 'hoje', buscaCli: '', ordemCli: 'visitas', limiteCli: 30, diasSumido: 45, todosSumidos: false, aniverProximo: false,
     alertas: { nao_lidos: 0, alertas: [] }, ultimoAlerta: null, timerAlertas: null,
   };
   let rotaAtual = 'dashboard';
@@ -894,6 +894,53 @@
   }
 
   /* ==================================================================== Caixa */
+  /* ------------------------------------------------ exportar CSV (abre no Excel em português) */
+  const csvCampo = (v) => {
+    let t = v == null ? '' : String(v);
+    // texto vindo do site (ex.: nome) não pode virar fórmula no Excel; números negativos ficam como estão
+    if (/^[=+\-@\t\r]/.test(t) && !/^-?\d+(,\d+)?$/.test(t)) t = "'" + t;
+    return /[";\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+  };
+  const csvNum = (v) => (v == null || v === '' ? '' : Number(v).toFixed(2).replace('.', ','));
+  const csvData = (iso) => (iso ? iso.slice(0, 10).split('-').reverse().join('/') : '');
+  function baixarCsv(nome, cabecalho, linhas) {
+    const texto = '﻿' + [cabecalho, ...linhas].map((l) => l.map(csvCampo).join(';')).join('\r\n');
+    const url = URL.createObjectURL(new Blob([texto], { type: 'text/csv;charset=utf-8' }));
+    const a = Object.assign(document.createElement('a'), { href: url, download: nome });
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  /** Planilha de movimentações do caixa num período, para o contador. */
+  function formExportarCaixa() {
+    const hoje = hojeIso();
+    abrirModal({
+      titulo: 'Exportar movimentações',
+      corpo: `<p class="sub">Planilha com todo dinheiro que entrou e saiu no período: pagamentos, vendas avulsas, devoluções, despesas, sangrias e reforços. Abre no Excel e pode ser enviada ao contador.</p>
+        <div class="grade2"><div class="campo"><label for="exp-de">De</label><input id="exp-de" type="date" value="${hoje.slice(0, 8)}01" max="${hoje}" required></div>
+          <div class="campo"><label for="exp-ate">Até</label><input id="exp-ate" type="date" value="${hoje}" max="${hoje}" required></div></div>`,
+      rodape: '<button type="button" class="btn" data-fechar>Cancelar</button><button type="submit" class="btn btn--solid"><i data-icon="download"></i>Baixar planilha</button>',
+      async enviar() {
+        const de = $('#exp-de').value, ate = $('#exp-ate').value;
+        if (!de || !ate || de > ate) return toast('Escolha um período válido.', false);
+        const linhas = await seguro(() => Api.extrato(de, ate));
+        if (!linhas) return;
+        if (!linhas.length) return toast('Nenhuma movimentação nesse período.', false);
+        // sangria e reforço só mudam o dinheiro de lugar: ficam na lista, mas fora dos totais
+        const conta = linhas.filter((l) => !/^Sangria|^Reforço/.test(l.tipo));
+        const entradas = centavos(conta.filter((l) => l.valor > 0).reduce((t, l) => t + l.valor, 0));
+        const saidas = centavos(conta.filter((l) => l.valor < 0).reduce((t, l) => t - l.valor, 0));
+        baixarCsv(`caixa_${de}_a_${ate}.csv`, ['Data', 'Hora', 'Tipo', 'Descrição', 'Forma', 'Entrada', 'Saída'], [
+          ...linhas.map((l) => [csvData(l.quando), l.quando.slice(11, 16), l.tipo, l.descricao, FORMAS[l.forma] || l.forma, l.valor > 0 ? csvNum(l.valor) : '', l.valor < 0 ? csvNum(-l.valor) : '']),
+          [],
+          ['', '', 'Total (sem sangria e reforço)', '', '', csvNum(entradas), csvNum(saidas)],
+          ['', '', 'Saldo do período', '', '', csvNum(entradas - saidas), ''],
+        ]);
+        fecharModal();
+        toast(`Planilha baixada: ${plural(linhas.length, 'movimentação', 'movimentações')}.`);
+      },
+    });
+  }
+
   const PERIODOS = { hoje: 'Hoje', semana: 'Semana', mes: 'Mês', ano: 'Ano', total: 'Tudo' };
   const TIPOS_MOV = { sangria: 'Sangria', despesa: 'Despesa', reforco: 'Reforço' };
   const AJUDA_MOV = {
@@ -1016,11 +1063,12 @@
             : vazio('scissors', 'Nenhum serviço vendido neste período')}</div>`;
     };
     c.innerHTML = `<div class="pg-topo"><div><h1>Caixa</h1><p>Abertura e fechamento do dia, faturamento e formas de pagamento.</p></div>
-        <div class="pg-acoes"><button type="button" class="btn btn--solid" data-venda-avulsa><i data-icon="box"></i>Venda avulsa</button></div></div>
+        <div class="pg-acoes"><button type="button" class="btn btn--sec" data-exportar-caixa><i data-icon="download"></i>Exportar</button><button type="button" class="btn btn--solid" data-venda-avulsa><i data-icon="box"></i>Venda avulsa</button></div></div>
       ${cartaoCaixaDia(caixaDia, dia)}${cartaoVendasAvulsas(vendas, caixaDia.status === 'fechado')}<div id="caixa-periodo"></div>`;
     render();
     c.onclick = async (e) => {
       if (e.target.closest('[data-venda-avulsa]')) return formVendaAvulsa(() => refazer());
+      if (e.target.closest('[data-exportar-caixa]')) return formExportarCaixa();
       const mov = e.target.closest('[data-mov]');
       if (mov) return formMovimentoCaixa(mov.dataset.mov, () => refazer());
       const ex = e.target.closest('[data-excluir-mov]');
@@ -1085,7 +1133,7 @@
     };
 
     c.innerHTML = `<div class="pg-topo"><div><h1>Clientes</h1><p>Quem mais frequenta, quanto cada cliente já movimentou e os dias de maior procura.</p></div>
-        <div class="pg-acoes"><button type="button" class="btn btn--solid" data-novo-cli><i data-icon="plus"></i>Novo cliente</button></div></div>
+        <div class="pg-acoes">${clientes.length ? '<button type="button" class="btn btn--sec" data-exportar-cli><i data-icon="download"></i>Exportar</button>' : ''}<button type="button" class="btn btn--solid" data-novo-cli><i data-icon="plus"></i>Novo cliente</button></div></div>
       <div class="kpis">
         ${kpi('Clientes', clientes.length, comVisita.length ? `${comVisita.length} já atendidos` : '')}
         ${kpi('Voltaram 2+ vezes', recorrentes, comVisita.length ? Math.round((recorrentes / comVisita.length) * 100) + '% dos atendidos' : '')}
@@ -1098,6 +1146,7 @@
           const cls = !abertos.has(s.dia) ? ' fechado' : temDiferenca && s.agendamentos === maxAberto ? ' top' : temDiferenca && s.agendamentos === minAberto ? ' baixo' : '';
           return `<div class="coluna${cls}"><b>${abertos.has(s.dia) || s.agendamentos ? s.agendamentos : ''}</b><span class="coluna__barra" style="height:${s.agendamentos ? Math.max(4, Math.round((s.agendamentos / maxSemana) * 100)) : 0}%"></span><small>${A.DIAS_CURTOS[s.dia]}</small></div>`;
         }).join('')}</div>` : vazio('chart', 'Ainda não há atendimentos realizados', 'O gráfico aparece depois dos primeiros atendimentos.')}</div>
+      <div class="cartao" id="cli-aniver"></div>
       <div class="cartao" id="cli-sumidos"></div>
       <div class="cartao"><div class="cartao__cab"><h2>Todos os clientes</h2>
           <div class="ferramentas"><label class="busca">${BJIcons.svg('search')}<input type="search" id="cli-busca" placeholder="Buscar por nome ou telefone" value="${esc(S.buscaCli)}" aria-label="Buscar cliente"></label>
@@ -1118,12 +1167,39 @@
           <div class="seg" role="tablist" aria-label="Sem vir há mais de">${[30, 45, 60].map((n) => `<button type="button" role="tab" aria-selected="${n === S.diasSumido}" data-sumido="${n}">${n} dias</button>`).join('')}</div></div>
         ${lista.length ? `<ul class="sumidos">${vis.map((x) => `<li>
             <span class="avatar avatar--sm">${esc(iniciais(x.nome))}</span>
-            <span class="sumidos__txt"><b>${esc(x.nome)}</b><small>Última visita há ${diasDesde(x.ultima_visita)} dias · ${plural(x.visitas, 'visita', 'visitas')} · ${A.fmtBRL(x.total_gasto)}</small></span>
+            <button type="button" class="sumidos__txt" data-ver-cli="${x.id}"><b>${esc(x.nome)}</b><small>Última visita há ${diasDesde(x.ultima_visita)} dias · ${plural(x.visitas, 'visita', 'visitas')} · ${A.fmtBRL(x.total_gasto)}</small></button>
             ${telValido(digitos(x.whatsapp)) ? `<a class="btn btn--sm btn--sec" href="${esc(waCliente(x.whatsapp))}?text=${encodeURIComponent(msg(x))}" target="_blank" rel="noopener">${BJIcons.svg('whatsapp')}Chamar</a>` : '<span class="sumidos__sem">Sem telefone</span>'}</li>`).join('')}</ul>
           ${lista.length > vis.length ? `<div class="mais"><button type="button" class="btn btn--sm btn--sec" data-todos-sumidos>Mostrar todos (${lista.length})</button></div>` : ''}`
           : `<p class="vendas-vazio">Bom sinal: todos os clientes atendidos voltaram ou já têm horário marcado.</p>`}`;
     };
     sumidos();
+
+    /** Aniversariantes do mês atual (ou do próximo), em ordem de dia. */
+    const aniversariantes = () => {
+      const [hy, hm, hd] = hojeIso().split('-').map(Number);
+      const mes = S.aniverProximo ? (hm % 12) + 1 : hm;
+      const anoDoMes = S.aniverProximo && hm === 12 ? hy + 1 : hy;
+      const comData = clientes.filter((x) => /^\d{4}-\d{2}-\d{2}/.test(x.aniversario || ''));
+      const lista = comData
+        .map((x) => { const [ay, am, ad] = x.aniversario.slice(0, 10).split('-').map(Number); return { ...x, am, ad, idade: anoDoMes - ay }; })
+        .filter((x) => x.am === mes)
+        .sort((a, b) => a.ad - b.ad || a.nome.localeCompare(b.nome, 'pt-BR'));
+      const diaTxt = (x) => {
+        if (S.aniverProximo) return `dia ${x.ad}`;
+        if (x.ad === hd) return '<b class="aniver__hoje">Hoje!</b>';
+        return x.ad > hd ? `dia ${x.ad} · em ${plural(x.ad - hd, 'dia', 'dias')}` : `dia ${x.ad} · já passou`;
+      };
+      const msg = (x) => `Feliz aniversário, ${x.nome.split(' ')[0]}! 🎉 A equipe da ${D.config.nome || 'Barbearia do Juan'} deseja um dia incrível. Que tal comemorar com um visual novo? ${linkAgendar}`;
+      $('#cli-aniver').innerHTML = `<div class="cartao__cab"><div><h2>Aniversariantes de ${esc(A.MESES[mes - 1].toLowerCase())}</h2>
+          <p>${lista.length ? plural(lista.length, 'cliente', 'clientes') : 'Nenhum aniversariante'}${comData.length < clientes.length ? ` · ${comData.length} de ${clientes.length} clientes têm a data cadastrada` : ''}</p></div>
+          <div class="seg" role="tablist" aria-label="Mês">${[[false, 'Este mês'], [true, 'Próximo mês']].map(([v, t]) => `<button type="button" role="tab" aria-selected="${S.aniverProximo === v}" data-aniver="${v ? 1 : 0}">${t}</button>`).join('')}</div></div>
+        ${lista.length ? `<ul class="sumidos">${lista.map((x) => `<li class="${!S.aniverProximo && x.ad < hd ? 'passou' : ''}">
+            <span class="avatar avatar--sm">${esc(iniciais(x.nome))}</span>
+            <button type="button" class="sumidos__txt" data-ver-cli="${x.id}"><b>${esc(x.nome)}</b><small>${diaTxt(x)}${x.idade > 0 && x.idade < 120 ? ` · faz ${x.idade} anos` : ''}</small></button>
+            ${telValido(digitos(x.whatsapp)) ? `<a class="btn btn--sm btn--sec" href="${esc(waCliente(x.whatsapp))}?text=${encodeURIComponent(msg(x))}" target="_blank" rel="noopener">${BJIcons.svg('whatsapp')}Parabéns</a>` : '<span class="sumidos__sem">Sem telefone</span>'}</li>`).join('')}</ul>`
+          : `<p class="vendas-vazio">${comData.length ? 'Ninguém faz aniversário neste mês.' : 'Nenhum cliente tem a data cadastrada ainda.'} Para cadastrar, toque no lápis do cliente em <b>Todos os clientes</b>.</p>`}`;
+    };
+    aniversariantes();
 
     const lista = () => {
       const q = S.buscaCli.trim().toLowerCase();
@@ -1139,7 +1215,7 @@
       $('#cli-lista').innerHTML = filtrados.length ? `<div class="tabela" role="table" aria-label="Clientes">
           <div class="tabela__cab" role="row"><span role="columnheader">Cliente</span><span role="columnheader">Visitas</span><span role="columnheader">Total</span><span role="columnheader">Última visita</span><span role="columnheader">Próxima</span><span role="columnheader"><span class="sr-only">WhatsApp</span></span></div>
           ${vis.map((x) => `<div class="tabela__linha" role="row">
-            <span class="cli" role="cell"><span class="avatar avatar--sm">${esc(iniciais(x.nome))}</span><span><b>${esc(x.nome)}</b><small>${x.whatsapp ? esc(fmtTel(x.whatsapp)) : 'Sem telefone'}</small></span></span>
+            <span class="cli" role="cell"><button type="button" class="cli__abrir" data-ver-cli="${x.id}" aria-label="Ver ${esc(x.nome)}"><span class="avatar avatar--sm">${esc(iniciais(x.nome))}</span><span><b>${esc(x.nome)}</b><small>${x.whatsapp ? esc(fmtTel(x.whatsapp)) : 'Sem telefone'}</small></span></button></span>
             <span role="cell" data-rot="Visitas">${x.visitas}${x.visitas >= 5 ? ' <span class="pill pill--ok">Fiel</span>' : ''}${x.faltas ? ` <span class="pill pill--warn" title="Marcou e não veio">${plural(x.faltas, 'falta', 'faltas')}</span>` : ''}</span>
             <span role="cell" data-rot="Total">${A.fmtBRL(x.total_gasto)}</span>
             <span role="cell" data-rot="Última visita">${x.ultima_visita ? A.fmtData(x.ultima_visita) : '—'}</span>
@@ -1157,10 +1233,68 @@
       const sm = e.target.closest('[data-sumido]');
       if (sm) { S.diasSumido = Number(sm.dataset.sumido); S.todosSumidos = false; sumidos(); $(`[data-sumido="${S.diasSumido}"]`).focus(); return; }
       if (e.target.closest('[data-todos-sumidos]')) { S.todosSumidos = true; sumidos(); return; }
+      const an = e.target.closest('[data-aniver]');
+      if (an) { S.aniverProximo = an.dataset.aniver === '1'; aniversariantes(); $(`[data-aniver="${an.dataset.aniver}"]`).focus(); return; }
       if (e.target.closest('[data-novo-cli]')) return formCliente(null, refazer);
+      if (e.target.closest('[data-exportar-cli]')) {
+        baixarCsv(`clientes_${hojeIso()}.csv`, ['Nome', 'WhatsApp', 'E-mail', 'Aniversário', 'Visitas', 'Faltas', 'Total gasto', 'Última visita', 'Próximo horário', 'Cadastrado em'],
+          clientes.slice().sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR')).map((x) => [x.nome, x.whatsapp ? fmtTel(x.whatsapp) : '', x.email, csvData(x.aniversario),
+            x.visitas, x.faltas || 0, csvNum(x.total_gasto), csvData(x.ultima_visita), csvData(x.proxima_visita), csvData(x.criado_em)]));
+        return toast(`Planilha baixada: ${plural(clientes.length, 'cliente', 'clientes')}.`);
+      }
+      const ver = e.target.closest('[data-ver-cli]');
+      if (ver) return verCliente(clientes.find((x) => String(x.id) === ver.dataset.verCli), refazer);
       const ed = e.target.closest('[data-editar-cli]');
       if (ed) formCliente(clientes.find((x) => String(x.id) === ed.dataset.editarCli), refazer);
     };
+  }
+
+  /** Ficha do cliente: contato, números e últimos atendimentos. */
+  function verCliente(cli, aoMudar) {
+    const tel = digitos(cli.whatsapp);
+    const hoje = hojeIso();
+    let idade = null;
+    if (/^\d{4}-\d{2}-\d{2}/.test(cli.aniversario || '')) {
+      const [ay, am, ad] = cli.aniversario.slice(0, 10).split('-').map(Number);
+      const [hy, hm, hd] = hoje.split('-').map(Number);
+      idade = hy - ay - (hm < am || (hm === am && hd < ad) ? 1 : 0);
+    }
+    const media = cli.visitas ? centavos(cli.total_gasto / cli.visitas) : 0;
+    const dataOu = (iso, vazio = '—') => (iso ? esc(A.fmtData(String(iso).slice(0, 10))) : vazio);
+    const linhaHist = (a) => `<button type="button" class="ag-row${a.status === 'cancelado' ? ' cancelado' : a.status === 'falta' ? ' falta' : ''}" data-ag="${a.id}">
+        <span class="ag-hora">${esc(dataCurta(a.data))}<small>${A.fmtMin(a.inicio_min)}</small></span>
+        <span class="ag-info"><span class="ag-nome">${esc(a.servicos.map((s) => s.nome).join(' + '))}</span><span class="ag-serv">${a.data > hoje ? 'Agendado' : a.status === 'confirmado' ? 'Atendido' : ''}</span></span>
+        <span class="ag-dir"><span class="ag-preco">${esc(valorAg(a))}</span>${pill(situacao(a))}</span></button>`;
+    abrirModal({
+      titulo: 'Cliente',
+      corpo: `<div class="det-cab"><span class="avatar">${esc(iniciais(cli.nome))}</span>
+          <div class="det-cab__txt"><strong>${esc(cli.nome)}</strong><span>${cli.visitas >= 5 ? 'Cliente fiel' : cli.visitas ? plural(cli.visitas, 'visita', 'visitas') : 'Ainda não veio'}</span></div>
+          ${cli.faltas ? pill([plural(cli.faltas, 'falta', 'faltas'), 'warn']) : ''}</div>
+        <section class="det-sec"><h3>Contato</h3><ul class="recibo">
+          <li><span>WhatsApp</span><b>${telValido(tel) ? `<a href="${esc(waCliente(cli.whatsapp))}" target="_blank" rel="noopener">${esc(fmtTel(cli.whatsapp))}</a>` : 'Não cadastrado'}</b></li>
+          <li><span>E-mail</span><b>${cli.email ? `<a href="mailto:${esc(cli.email)}">${esc(cli.email)}</a>` : 'Não cadastrado'}</b></li>
+          <li><span>Aniversário</span><b>${cli.aniversario ? `${dataOu(cli.aniversario)}${idade != null && idade >= 0 && idade < 120 ? ` · ${idade} anos` : ''}` : 'Não cadastrado'}</b></li>
+          <li><span>Cliente desde</span><b>${dataOu(cli.criado_em)}</b></li></ul></section>
+        <section class="det-sec"><h3>Números</h3>
+          <div class="det-fatos"><div><span>Visitas</span><strong>${cli.visitas}</strong></div><div><span>Total gasto</span><strong>${A.fmtBRL(cli.total_gasto)}</strong></div><div><span>Média por visita</span><strong>${media ? A.fmtBRL(media) : '—'}</strong></div></div>
+          <div class="det-fatos"><div><span>Última visita</span><strong>${dataOu(cli.ultima_visita)}</strong></div><div><span>Próximo horário</span><strong>${dataOu(cli.proxima_visita, 'Nenhum')}</strong></div><div><span>Faltas</span><strong>${cli.faltas || 0}</strong></div></div></section>
+        <section class="det-sec"><h3>Últimos atendimentos</h3><div id="cli-hist"><p class="slots-adm-msg"><span class="spinner" aria-hidden="true"></span>Carregando…</p></div></section>`,
+      rodape: `<button type="button" class="btn" data-fechar>Fechar</button><span class="modal__espaco"></span>
+        ${telValido(tel) ? `<a class="btn btn--sec" href="${esc(waCliente(cli.whatsapp))}" target="_blank" rel="noopener"><i data-icon="whatsapp"></i>WhatsApp</a>` : ''}
+        <button type="button" class="btn btn--solid" id="cli-editar"><i data-icon="edit"></i>Editar contato</button>`,
+      aberto() {
+        $('#cli-editar').addEventListener('click', () => formCliente(cli, aoMudar));
+        seguro(() => Api.historicoCliente(cli.id)).then((lista) => {
+          const box = $('#cli-hist');
+          if (!box) return; // a janela já foi fechada ou trocada
+          (lista || []).forEach((a) => S.ag.set(String(a.id), a));
+          box.innerHTML = lista && lista.length
+            ? `<div class="lista">${lista.map(linhaHist).join('')}</div>${lista.length >= 30 ? '<p class="det-meta">Mostrando os 30 mais recentes.</p>' : ''}`
+            : '<p class="det-vazio">Nenhum atendimento ainda.</p>';
+          box.onclick = (e) => { const r = e.target.closest('[data-ag]'); if (r) detalheAg(S.ag.get(r.dataset.ag), aoMudar); };
+        });
+      },
+    });
   }
 
   /** Cria (cli = null) ou edita um contato. */

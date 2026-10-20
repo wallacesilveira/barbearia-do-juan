@@ -459,6 +459,30 @@ function vendaAvulsa(id) {
 function listarVendasAvulsas(data) {
   return db.prepare('SELECT id FROM vendas_avulsas WHERE data = ? ORDER BY id DESC').all(data).map((v) => vendaAvulsa(v.id));
 }
+/**
+ * Extrato para o contador: todo dinheiro que entrou ou saiu no período, pela data do movimento.
+ * valor > 0 é entrada, valor < 0 é saída. quando = 'YYYY-MM-DD HH:MM' (horário de São Paulo).
+ */
+function extrato(de, ate) {
+  const hm = (s) => String(s || '').slice(0, 16);
+  const linhas = [
+    ...db.prepare(`SELECT r.recebido_em AS quando, r.valor, r.forma, a.codigo, c.nome FROM recebimentos_agendamento r
+      JOIN agendamentos a ON a.id = r.agendamento_id JOIN clientes c ON c.id = a.cliente_id
+      WHERE date(r.recebido_em) BETWEEN ? AND ?`).all(de, ate)
+      .map((r) => ({ quando: hm(r.quando), tipo: 'Pagamento de atendimento', descricao: `${padronizarNome(r.nome)} · ${r.codigo}`, forma: r.forma, valor: centavos(r.valor) })),
+    ...db.prepare(`SELECT v.id, v.criado_em AS quando, v.valor_total, v.forma, v.cliente_nome,
+        (SELECT GROUP_CONCAT(CASE WHEN i.quantidade > 1 THEN i.quantidade || '× ' ELSE '' END || i.nome, ', ') FROM vendas_avulsas_itens i WHERE i.venda_id = v.id) AS itens
+      FROM vendas_avulsas v WHERE v.status = 'ativa' AND v.data BETWEEN ? AND ?`).all(de, ate)
+      .map((v) => ({ quando: hm(v.quando), tipo: 'Venda avulsa', descricao: [v.itens, v.cliente_nome ? padronizarNome(v.cliente_nome) : ''].filter(Boolean).join(' · '), forma: v.forma, valor: centavos(v.valor_total) })),
+    ...db.prepare(`SELECT e.criado_em AS quando, e.valor, e.forma, a.codigo, a.status, c.nome FROM estornos e
+      JOIN agendamentos a ON a.id = e.agendamento_id JOIN clientes c ON c.id = a.cliente_id
+      WHERE date(e.criado_em) BETWEEN ? AND ?`).all(de, ate)
+      .map((e) => ({ quando: hm(e.quando), tipo: 'Devolução ao cliente', descricao: `${padronizarNome(e.nome)} · ${e.codigo} ${e.status === 'falta' ? 'com falta' : 'cancelado'}`, forma: e.forma, valor: -centavos(e.valor) })),
+    ...db.prepare('SELECT criado_em AS quando, tipo, valor, forma, descricao FROM movimentos_caixa WHERE data BETWEEN ? AND ?').all(de, ate)
+      .map((mv) => ({ quando: hm(mv.quando), tipo: { despesa: 'Despesa', sangria: 'Sangria (retirada da gaveta)', reforco: 'Reforço de troco' }[mv.tipo], descricao: mv.descricao, forma: mv.forma, valor: mv.tipo === 'reforco' ? centavos(mv.valor) : -centavos(mv.valor) })),
+  ];
+  return linhas.sort((a, b) => a.quando.localeCompare(b.quando));
+}
 /** Visita = agendamento confirmado cuja data já chegou. Cancelados e futuros não contam. */
 function clientesResumo() {
   const hoje = agoraSP().data;
@@ -1010,6 +1034,16 @@ async function api(req, res, url) {
         try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
         throw e;
       }
+    }
+    if (m === 'GET' && rota === 'admin/cliente-historico') {
+      const id = Number(url.searchParams.get('id'));
+      if (!Number.isInteger(id) || id < 1) throw new Erro(400, 'DADOS_INVALIDOS');
+      return json(res, 200, db.prepare('SELECT * FROM agendamentos WHERE cliente_id = ? ORDER BY data DESC, inicio_min DESC LIMIT 30').all(id).map((a) => formatarAgendamento({ ...a })));
+    }
+    if (m === 'GET' && rota === 'admin/extrato') {
+      const de = url.searchParams.get('de'), ate = url.searchParams.get('ate');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(de || '') || !/^\d{4}-\d{2}-\d{2}$/.test(ate || '') || de > ate) throw new Erro(400, 'DATA_INVALIDA', 'Escolha um período válido.');
+      return json(res, 200, extrato(de, ate));
     }
     if (m === 'GET' && rota === 'admin/movimentos-estoque') {
       const produtoId = Number(url.searchParams.get('produto_id'));

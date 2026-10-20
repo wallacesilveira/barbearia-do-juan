@@ -327,7 +327,12 @@ a.aviso-barra:hover { border-color: var(--gold); }
 .sumidos__txt b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sumidos__txt small { color: var(--muted); font-size: 12px; }
 .sumidos__sem { color: var(--dim); font-size: 12px; }
-#cli-sumidos .cartao__cab { flex-wrap: wrap; gap: 10px; }
+button.sumidos__txt { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+button.sumidos__txt:hover b { color: var(--gold-2); text-decoration: underline; text-underline-offset: 3px; }
+.det-sec .det-fatos { margin-bottom: 8px; }
+#cli-sumidos .cartao__cab, #cli-aniver .cartao__cab { flex-wrap: wrap; gap: 10px; }
+.sumidos li.passou { opacity: .6; }
+.aniver__hoje { color: var(--gold-2); font-weight: 600; }
 .conta > div:not(.conta__op) { display: flex; flex-direction: column; gap: 3px; padding: 12px 14px; border-radius: 10px; background: var(--surface-2); }
 .conta span { color: var(--muted); font-size: 12px; }
 .conta b { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -410,6 +415,10 @@ a.aviso-barra:hover { border-color: var(--gold); }
 .cli > span:last-child { display: flex; flex-direction: column; min-width: 0; }
 .cli b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cli small { color: var(--muted); font-size: 12px; }
+.cli__abrir { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.cli__abrir > span:last-child { display: flex; flex-direction: column; min-width: 0; }
+.cli__abrir:hover b { color: var(--gold-2); text-decoration: underline; text-underline-offset: 3px; }
+.cli__abrir:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; border-radius: 6px; }
 .avatar { display: grid; place-items: center; width: 44px; height: 44px; flex: none; border-radius: 50%; background: linear-gradient(145deg, #3a3226, #241f18); border: 1px solid rgba(201, 166, 107, .35); color: var(--gold-2); font-size: 15px; font-weight: 600; letter-spacing: .02em; }
 .avatar--sm { width: 34px; height: 34px; font-size: 12px; }
 .mais { display: flex; justify-content: center; padding: 14px; border-top: 1px solid var(--line); }

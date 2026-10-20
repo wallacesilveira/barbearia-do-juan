@@ -5,6 +5,10 @@
 -- (O schema.sql completo já inclui tudo isto.)
 -- =====================================================================
 
+-- contato do cliente (e-mail e aniversário): o resumo de clientes abaixo lê essas colunas
+alter table clientes add column if not exists email text not null default '';
+alter table clientes add column if not exists aniversario date;
+
 -- novo status 'falta': não conta como visita nem faturamento e não ocupa a agenda
 do $$
 declare r record;

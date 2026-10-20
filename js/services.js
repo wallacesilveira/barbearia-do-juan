@@ -77,6 +77,7 @@
     /** tipo: 'sangria' | 'despesa' | 'reforco' — sempre no caixa de hoje. */
     movimentoCaixa(tipo, valor, forma, descricao) { return this._post('admin/caixa-movimento', { tipo, valor, forma, descricao }); },
     excluirMovimentoCaixa(id) { return this._post('admin/caixa-movimento/excluir', { id }); },
+    extrato(de, ate) { return this._get(`admin/extrato?de=${de}&ate=${ate}`); },
     vendasAvulsas(data) { return this._get('admin/vendas-avulsas?data=' + data); },
     vendaAvulsa(itens, forma, clienteId) { return this._post('admin/venda-avulsa', { itens, forma, cliente_id: clienteId || null }); },
     cancelarVendaAvulsa(id) { return this._post('admin/venda-avulsa/cancelar', { id }); },
@@ -88,6 +89,7 @@
     venderProduto(agendamentoId, produtoId, quantidade) { return this._post('admin/venda-produto', { agendamento_id: agendamentoId, produto_id: produtoId, quantidade }); },
     movimentosEstoque(produtoId) { return this._get('admin/movimentos-estoque?produto_id=' + produtoId); },
     agendamentos(de, ate) { return this._get(`admin/agendamentos?de=${de}&ate=${ate}`); },
+    historicoCliente(id) { return this._get('admin/cliente-historico?id=' + Number(id)); },
     /** devolver = true lança estorno do que o cliente já pagou. */
     cancelar(id, devolver = false) { return this._post('admin/cancelar', { id, devolver }); },
     marcarFalta(id, devolver = false) { return this._post('admin/falta', { id, devolver }); },
@@ -179,8 +181,11 @@
       if (t) pedir(cfg.supabaseUrl + '/auth/v1/logout', { method: 'POST', headers: { apikey: cfg.supabaseKey, Authorization: 'Bearer ' + t } }).catch(() => {});
     },
     logado() { return !!guardar.get(); },
-    agendamentos(de, ate) {
-      return this._rest(`agendamentos?select=*,clientes(nome,whatsapp),agendamento_servicos(nome,duracao_min,preco),agendamento_produtos(nome,quantidade,preco_unitario,valor_total),recebimentos_agendamento(id,valor,forma,recebido_em),estornos(id,valor,forma,criado_em),remarcacoes(id,data_anterior,inicio_anterior,data_nova,inicio_novo,criado_em)&remarcacoes.order=id&data=gte.${de}&data=lte.${ate}&order=data,inicio_min`)
+    agendamentos(de, ate) { return this._agendamentos(`data=gte.${de}&data=lte.${ate}&order=data,inicio_min`); },
+    /** Últimos agendamentos de um cliente, do mais recente para o mais antigo. */
+    historicoCliente(id) { return this._agendamentos(`cliente_id=eq.${Number(id)}&order=data.desc,inicio_min.desc&limit=30`); },
+    _agendamentos(filtro) {
+      return this._rest(`agendamentos?select=*,clientes(nome,whatsapp),agendamento_servicos(nome,duracao_min,preco),agendamento_produtos(nome,quantidade,preco_unitario,valor_total),recebimentos_agendamento(id,valor,forma,recebido_em),estornos(id,valor,forma,criado_em),remarcacoes(id,data_anterior,inicio_anterior,data_nova,inicio_novo,criado_em)&remarcacoes.order=id&${filtro}`)
         .then((l) => l.map(({ clientes, agendamento_servicos, agendamento_produtos, recebimentos_agendamento, estornos: est, remarcacoes, cliente_id, ...a }) => {
           const pagamentos = (recebimentos_agendamento || []).map((p) => ({ ...p, valor: Number(p.valor) }));
           const estornos = (est || []).map((e) => ({ ...e, valor: Number(e.valor) }));
@@ -264,6 +269,7 @@
     fecharCaixa(data, valor) { return this._rpc('fechar_caixa_diario', { p_data: data, p_valor_contado: valor }); },
     movimentoCaixa(tipo, valor, forma, descricao) { return this._rpc('registrar_movimento_caixa', { p_tipo: tipo, p_valor: valor, p_forma: forma || 'dinheiro', p_descricao: descricao || '' }); },
     excluirMovimentoCaixa(id) { return this._rpc('excluir_movimento_caixa', { p_id: id }); },
+    async extrato(de, ate) { return (await this._rpc('extrato', { p_de: de, p_ate: ate })).map((l) => ({ ...l, valor: Number(l.valor) })); },
     vendasAvulsas(data) { return this._rpc('listar_vendas_avulsas', { p_data: data }); },
     vendaAvulsa(itens, forma, clienteId) { return this._rpc('registrar_venda_avulsa', { p_itens: itens, p_forma: forma, p_cliente_id: clienteId || null }); },
     cancelarVendaAvulsa(id) { return this._rpc('cancelar_venda_avulsa', { p_id: id }); },
