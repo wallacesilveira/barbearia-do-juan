@@ -6,10 +6,10 @@
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
-  let D = { config: {}, servicos: [], produtos: [], combos: [], horarios: [], galeria: [], bloqueios: [] };
+  let D = { config: {}, servicos: [], produtos: [], combos: [], horarios: [], galeria: [], bloqueios: [], profissionais: [] };
   const S = {
     dia: null, mes: null, diaAg: null, mostrarCancelados: false, mostrarPassados: false, ag: new Map(),
-    periodo: 'hoje', buscaCli: '', ordemCli: 'visitas', limiteCli: 30, diasSumido: 45, todosSumidos: false, aniverProximo: false,
+    periodo: 'hoje', buscaCli: '', ordemCli: 'visitas', limiteCli: 30, diasSumido: 45, todosSumidos: false, aniverProximo: false, profAgenda: null,
     alertas: { nao_lidos: 0, alertas: [] }, ultimoAlerta: null, timerAlertas: null,
   };
   let rotaAtual = 'dashboard';
@@ -94,6 +94,13 @@
     CAIXA_JA_ABERTO: 'O caixa deste dia já foi aberto.',
     CAIXA_JA_FECHADO: 'O caixa de hoje já foi fechado.',
     CAIXA_NAO_ABERTO: 'Abra o caixa de hoje primeiro.',
+    PERIODO_JA_FECHADO: 'Já existe um fechamento deste barbeiro em parte desse período.',
+    DADOS_DESATUALIZADOS: 'Os vales mudaram desde que a tela foi aberta. Atualize e confira de novo.',
+    MOVIMENTO_FECHADO: 'Este lançamento faz parte do fechamento de um barbeiro. Desfaça o fechamento para alterá-lo.',
+    FECHAMENTO_NAO_ENCONTRADO: 'Fechamento não encontrado. Atualize a página.',
+    ULTIMO_PROFISSIONAL: 'É preciso ter pelo menos um barbeiro ativo.',
+    PROFISSIONAL_COM_AGENDA: 'Este barbeiro tem horários marcados. Reagende para outro barbeiro antes de desativar.',
+    PROFISSIONAL_INVALIDO: 'Este barbeiro não está mais disponível. Escolha outro.',
     CAIXA_FECHADO_DINHEIRO: 'O caixa de hoje já foi fechado. Registre em pix, cartão ou outro, ou receba o dinheiro amanhã.',
     SALDO_GAVETA_INSUFICIENTE: 'O valor é maior do que deveria haver na gaveta.',
     DESCRICAO_OBRIGATORIA: 'Diga com o que foi a despesa.',
@@ -230,15 +237,29 @@
 
   async function recarregar() {
     const dados = await Api.carregarAdmin();
-    D = { config: {}, servicos: [], produtos: [], combos: [], horarios: [], galeria: [], bloqueios: [], ...dados };
+    D = { config: {}, servicos: [], produtos: [], combos: [], horarios: [], galeria: [], bloqueios: [], profissionais: [], ...dados };
     D.produtos = Array.isArray(dados.produtos) ? dados.produtos : [];
+    D.profissionais = Array.isArray(dados.profissionais) ? dados.profissionais : [];
+    // filtro da agenda apontando para barbeiro que saiu da lista volta para "todos"
+    if (S.profAgenda && !profsAtivos().some((p) => p.id === S.profAgenda)) S.profAgenda = null;
   }
+  /* barbeiros: com um só, nada de barbeiro aparece na tela (o painel fica igual ao de sempre) */
+  const profsAtivos = () => D.profissionais.filter((p) => p.ativo);
+  const variosProfs = () => profsAtivos().length > 1;
+  const nomeProf = (a) => (a && a.profissional && a.profissional.nome) || '';
+  const doProfFiltro = (a) => !S.profAgenda || !a.profissional || a.profissional.id === S.profAgenda;
+  /** Expediente semanal do barbeiro: o próprio, se tiver; senão, o da barbearia. */
+  const horariosDoProf = (id) => { const p = D.profissionais.find((x) => x.id === id); return p && p.horarios && p.horarios.length ? p.horarios : D.horarios; };
+  /** Seletor "Todos os barbeiros / Fulano" das telas de agenda (só com dois ou mais). */
+  const filtroProfHtml = () => (variosProfs()
+    ? `<select id="filtro-prof" class="filtro-prof" aria-label="Barbeiro"><option value="">Todos os barbeiros</option>${profsAtivos().map((p) => `<option value="${p.id}" ${S.profAgenda === p.id ? 'selected' : ''}>${esc(p.nome)}</option>`).join('')}</select>`
+    : '');
 
   /* --------------------------------------------------------------- roteador */
   const VIEWS = {
     dashboard: ['Hoje', vDashboard], agendamentos: ['Agenda', vAgendamentos], caixa: ['Caixa', vCaixa], clientes: ['Clientes', vClientes], alertas: ['Alertas', vAlertas],
     servicos: ['Serviços', vServicos], combos: ['Combos', vCombos], produtos: ['Produtos', vProdutos],
-    horarios: ['Horários', vHorarios], bloqueios: ['Bloqueios', vBloqueios], galeria: ['Galeria', vGaleria], config: ['Configurações', vConfig],
+    barbeiros: ['Barbeiros', vBarbeiros], horarios: ['Horários', vHorarios], bloqueios: ['Bloqueios', vBloqueios], galeria: ['Galeria', vGaleria], config: ['Configurações', vConfig],
   };
   async function rotear() {
     if ($('#painel').hidden) return;
@@ -335,7 +356,7 @@
     const nomes = a.servicos.map((s) => s.nome).join(' + ');
     return `<button type="button" class="ag-row${a.status === 'cancelado' ? ' cancelado' : a.status === 'falta' ? ' falta' : ''}${extra}" data-ag="${a.id}">
       <span class="ag-hora">${A.fmtMin(a.inicio_min)}<small>até ${A.fmtMin(a.fim_min)}</small></span>
-      <span class="ag-info"><span class="ag-nome">${esc(BJ.nome(a.cliente.nome))}</span><span class="ag-serv">${esc(nomes)}</span></span>
+      <span class="ag-info"><span class="ag-nome">${esc(BJ.nome(a.cliente.nome))}</span><span class="ag-serv">${esc(nomes)}${variosProfs() && nomeProf(a) && !S.profAgenda ? ` · <b class="ag-prof">${esc(nomeProf(a))}</b>` : ''}</span></span>
       <span class="ag-dir"><span class="ag-preco">${esc(valorAg(a))}</span>${pill(situacao(a))}</span></button>`;
   }
 
@@ -366,7 +387,7 @@
       ajuste ? `<li class="${ajuste < 0 ? 'neg' : 'pos'}"><span>${ajuste < 0 ? 'Desconto' : 'Adicional'}</span><b>${ajuste < 0 ? '− ' : '+ '}${A.fmtBRL(Math.abs(ajuste))}</b></li>` : '',
       `<li class="recibo__total"><span>Total</span><b>${esc(valorAg(a))}</b></li>`,
     ].join('');
-    const pagamentos = (a.pagamentos || []).map((p) => `<li><span>${esc(FORMAS[p.forma] || p.forma)}<small>${esc(quando(p.recebido_em))}</small></span><b>${A.fmtBRL(p.valor)}</b></li>`).join('')
+    const pagamentos = (a.pagamentos || []).map((p) => `<li><span>${esc(FORMAS[p.forma] || p.forma)}${p.recebido_por === 'profissional' ? ` · <span class="pill pill--muted">com ${esc(nomeProf(a) || 'o barbeiro')}</span>` : ''}<small>${esc(quando(p.recebido_em))}</small></span><b>${A.fmtBRL(p.valor)}</b></li>`).join('')
       + (a.estornos || []).map((e) => `<li class="neg"><span>Devolvido · ${esc(FORMAS[e.forma] || e.forma)}<small>${esc(quando(e.criado_em))}</small></span><b>− ${A.fmtBRL(e.valor)}</b></li>`).join('');
     const ficouComBarbearia = !confirmado && pago > 0 && !(a.estornos || []).length;
     const faltou = a.status === 'falta';
@@ -384,8 +405,8 @@
         </div>
         <div class="det-fatos">
           <div><span>Data</span><strong>${esc(dataCurta(a.data))}</strong></div>
-          <div><span>Horário</span><strong>${A.fmtMin(a.inicio_min)} – ${A.fmtMin(a.fim_min)}</strong></div>
-          <div><span>Duração</span><strong>${A.fmtDur(a.duracao_min)}</strong></div>
+          <div><span>Horário${variosProfs() ? ` · ${A.fmtDur(a.duracao_min)}` : ''}</span><strong>${A.fmtMin(a.inicio_min)} – ${A.fmtMin(a.fim_min)}</strong></div>
+          ${variosProfs() ? `<div><span>Barbeiro</span><strong>${esc(nomeProf(a) || '—')}</strong></div>` : `<div><span>Duração</span><strong>${A.fmtDur(a.duracao_min)}</strong></div>`}
         </div>
         <section class="det-sec"><h3>Comanda</h3><ul class="recibo">${recibo}</ul></section>
         <section class="det-sec"><div class="det-sec__topo"><h3>Pagamento</h3><span>${A.fmtBRL(pago)} de ${A.fmtBRL(total)}</span></div>
@@ -462,6 +483,8 @@
     abrirModal({
       titulo: 'Registrar pagamento',
       corpo: `<p class="sub">${esc(BJ.nome(a.cliente.nome))} · falta receber <strong>${A.fmtBRL(saldo)}</strong></p>
+        ${a.profissional && (() => { const c = contratoAtual(a.profissional.id); return c.tipo === 'aluguel' && c.recebimento === 'barbeiro'; })()
+          ? `<p class="nota">${BJIcons.svg('info')}${esc(a.profissional.nome)} aluga a cadeira e recebe direto: este valor fica com ele e não entra na gaveta. Os produtos da comanda entram no acerto dele.</p>` : ''}
         <div class="campo"><label for="receb-valor">Valor recebido</label><div class="campo-moeda"><span>R$</span><input id="receb-valor" inputmode="decimal" autocomplete="off" value="${fmtNum(saldo.toFixed(2))}" required></div>
           <small>Pode ser parcial. O restante continua pendente.</small></div>
         <fieldset class="campo"><legend class="rotulo">Forma de pagamento</legend><div class="opcoes">${Object.entries(FORMAS).map(([k, v]) => `<label class="opcao"><input type="radio" name="receb-forma" value="${k}" ${k === 'pix' ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div></fieldset>`,
@@ -667,7 +690,13 @@
       const dl = $('#admin-ag-clientes');
       if (dl) dl.innerHTML = clientes.map((c) => `<option value="${esc(c.nome)}">${c.whatsapp ? esc(fmtTel(c.whatsapp)) : ''}</option>`).join('');
     });
-    const ehAtual = (data, min) => remarcar && data === remarcar.data && min === remarcar.inicio_min;
+    // barbeiro: ao reagendar começa com o atual; no novo, o do filtro da agenda ou o primeiro da lista
+    const profAtualId = remarcar && remarcar.profissional ? remarcar.profissional.id : null;
+    const primeiroProf = profsAtivos()[0] ? profsAtivos()[0].id : null;
+    let profSel = profAtualId || S.profAgenda || primeiroProf;
+    if (profSel && !profsAtivos().some((p) => p.id === profSel)) profSel = primeiroProf;
+    const ehAtual = (data, min) => remarcar && data === remarcar.data && min === remarcar.inicio_min && (!profAtualId || profSel === profAtualId);
+    const nomeDe = (id) => (D.profissionais.find((p) => p.id === id) || {}).nome || '';
     abrirModal({
       titulo: remarcar ? 'Reagendar' : 'Novo agendamento',
       corpo: `${remarcar
@@ -676,6 +705,7 @@
         <div class="grade2"><div class="campo"><label for="admin-ag-nome">Nome do cliente</label><input id="admin-ag-nome" maxlength="80" list="admin-ag-clientes" autocomplete="off" required><datalist id="admin-ag-clientes"></datalist></div>
           <div class="campo"><label for="admin-ag-whats">WhatsApp <span class="opcional">opcional</span></label><input id="admin-ag-whats" ${CAMPO_TEL}></div></div>
         <fieldset class="campo"><legend class="rotulo">Serviços</legend><div class="chips">${servicos.map((s) => `<label class="chip"><input type="checkbox" name="admin-ag-servico" value="${s.id}"><span>${esc(s.nome)}<small>${esc(brl(s.preco))}</small></span></label>`).join('')}</div></fieldset>`}
+        ${variosProfs() ? `<fieldset class="campo"><legend class="rotulo">Barbeiro</legend><div class="chips">${profsAtivos().map((p) => `<label class="chip"><input type="radio" name="admin-ag-prof" value="${p.id}" ${p.id === profSel ? 'checked' : ''}><span>${esc(p.nome)}</span></label>`).join('')}</div></fieldset>` : ''}
         <div class="campo"><label for="admin-ag-data">${remarcar ? 'Nova data' : 'Data'}</label><input id="admin-ag-data" type="date" value="${esc((remarcar && remarcar.data) || dataInicial || hojeIso())}" required></div>
         <fieldset class="campo"><legend class="rotulo">${remarcar ? 'Novo horário' : 'Horário'}</legend><div id="admin-ag-slots" class="slots-adm-area"></div></fieldset>
         <div class="previa" id="admin-ag-resumo"><span>Selecione ao menos um serviço</span><strong></strong></div>`,
@@ -686,7 +716,7 @@
           const box = $('#admin-ag-resumo');
           if (remarcar) {
             const novo = inicioSel != null ? `${A.fmtMin(inicioSel)} às ${A.fmtMin(inicioSel + remarcar.duracao_min)}` : 'escolha o novo horário';
-            box.innerHTML = `<span>${A.fmtDur(remarcar.duracao_min)} · ${novo}</span><strong>${esc(valorAg(remarcar))}</strong>`;
+            box.innerHTML = `<span>${A.fmtDur(remarcar.duracao_min)} · ${novo}${variosProfs() && profSel ? ` · com ${esc(nomeDe(profSel))}` : ''}</span><strong>${esc(valorAg(remarcar))}</strong>`;
             return;
           }
           const p = A.calcPricing(ids(), D.servicos, D.combos);
@@ -697,7 +727,12 @@
         const horarios = async () => {
           const area = $('#admin-ag-slots'); const data = $('#admin-ag-data').value;
           if (!data) { area.innerHTML = '<p class="slots-adm-msg">Escolha a data.</p>'; return resumo(); }
-          if (!A.janelaDoDia(data, D.horarios)) { inicioSel = null; area.innerHTML = '<p class="slots-adm-msg">A barbearia não abre neste dia.</p>'; return resumo(); }
+          const hor = horariosDoProf(profSel);
+          if (!A.janelaDoDia(data, hor)) {
+            inicioSel = null;
+            area.innerHTML = `<p class="slots-adm-msg">${hor === D.horarios ? 'A barbearia não abre neste dia.' : `${esc(nomeDe(profSel))} não trabalha neste dia.`}</p>`;
+            return resumo();
+          }
           if (!cacheDia[data]) {
             area.innerHTML = '<p class="slots-adm-msg"><span class="spinner" aria-hidden="true"></span>Carregando horários…</p>';
             const lista = await seguro(() => Api.agendamentos(data, data));
@@ -705,11 +740,13 @@
             cacheDia[data] = (lista || []).filter((a) => a.status === 'confirmado' && !(remarcar && a.id === remarcar.id));
             if ($('#admin-ag-data').value !== data) return; // trocou a data no meio do caminho
           }
-          const ags = cacheDia[data];
+          // só a ocupação do barbeiro escolhido: dele e os bloqueios da barbearia toda
+          const ags = cacheDia[data].filter((a) => !profSel || !a.profissional || a.profissional.id === profSel);
+          const blqs = D.bloqueios.filter((b) => b.profissional_id == null || !profSel || b.profissional_id === profSel);
           const temServico = !!remarcar || ids().length > 0;
           const passo = Math.max(5, Number(D.config.passo_min || 20));
           const duracao = remarcar ? remarcar.duracao_min : temServico ? A.calcPricing(ids(), D.servicos, D.combos).duracao : passo;
-          const slots = A.gerarHorarios({ data, duracao, horarios: D.horarios, config: D.config, bloqueios: D.bloqueios, ocupados: ags.map((a) => ({ ini: a.inicio_min, fim: a.fim_min })) })
+          const slots = A.gerarHorarios({ data, duracao, horarios: hor, config: D.config, bloqueios: blqs, ocupados: ags.map((a) => ({ ini: a.inicio_min, fim: a.fim_min })) })
             .filter((s) => s.motivo !== 'FORA_DO_EXPEDIENTE');
           const agoraMin = data === hojeIso() ? minAgora() : -1;
           const livres = slots.filter((s) => s.livre && !ehAtual(data, s.inicio_min));
@@ -720,13 +757,13 @@
           const almoco = A.almoco(D.config);
           const ocupante = (t) => {
             if (almoco && almoco.ini <= t && t < almoco.fim) return { chave: 'almoco', rot: 'Almoço', ini: almoco.ini, fim: almoco.fim };
-            const b = D.bloqueios.find((x) => x.data === data && x.inicio_min <= t && t < x.fim_min);
+            const b = blqs.find((x) => x.data === data && x.inicio_min <= t && t < x.fim_min);
             if (b) return { chave: 'b' + b.id, rot: b.motivo || 'Bloqueado', ini: b.inicio_min, fim: b.fim_min };
             const a = ags.find((x) => x.inicio_min <= t && t < x.fim_min);
             if (a) return { chave: 'a' + a.id, rot: BJ.nome(a.cliente.nome).split(' ')[0], ini: a.inicio_min, fim: a.fim_min };
             return null;
           };
-          const janela = A.janelaDoDia(data, D.horarios);
+          const janela = A.janelaDoDia(data, hor);
           let ultimaChave = null;
           const itens = slots.map((s) => {
             const passou = s.inicio_min < agoraMin;
@@ -753,7 +790,8 @@
           resumo();
         };
         $('#modal-corpo').onchange = (e) => {
-          if (e.target.matches('input[name="admin-ag-servico"], #admin-ag-data')) horarios();
+          if (e.target.name === 'admin-ag-prof') { profSel = Number(e.target.value); horarios(); }
+          else if (e.target.matches('input[name="admin-ag-servico"], #admin-ag-data')) horarios();
           else if (e.target.id === 'admin-ag-nome') {
             const c = clientes.find((x) => x.nome.toLowerCase() === e.target.value.trim().toLowerCase());
             if (c && c.whatsapp && !$('#admin-ag-whats').value) $('#admin-ag-whats').value = fmtTel(c.whatsapp);
@@ -773,11 +811,11 @@
         if (remarcar) {
           const data = $('#admin-ag-data').value;
           if (!data || inicioSel == null) return toast('Escolha a nova data e um horário livre.', false);
-          const r = await seguro(() => Api.reagendar(remarcar.id, data, inicioSel));
+          const r = await seguro(() => Api.reagendar(remarcar.id, data, inicioSel, profSel));
           if (!r) return;
           if (!r.ok) return toast(BJ.mensagemErro(r.erro), false);
           fecharModal();
-          toast(`Horário de ${BJ.nome(remarcar.cliente.nome).split(' ')[0]} mudado para ${A.fmtData(data)} às ${A.fmtMin(inicioSel)}.${remarcar.lembrete_aberto_em || remarcar.lembrete_enviado_em ? ' Envie o lembrete de novo com o horário novo.' : ''}`);
+          toast(`Horário de ${BJ.nome(remarcar.cliente.nome).split(' ')[0]} mudado para ${A.fmtData(data)} às ${A.fmtMin(inicioSel)}${variosProfs() && profSel ? ` com ${nomeDe(profSel)}` : ''}.${remarcar.lembrete_aberto_em || remarcar.lembrete_enviado_em ? ' Envie o lembrete de novo com o horário novo.' : ''}`);
           aoCriar(data);
           return;
         }
@@ -789,7 +827,7 @@
         if (whatsapp && !telValido(whatsapp)) return toast('Confira o WhatsApp: DDD + número, ex.: (11)98765-4321. Ou deixe o campo vazio.', false);
         if (!servico_ids.length) return toast('Selecione pelo menos um serviço.', false);
         if (!data || inicioSel == null) return toast('Escolha a data e um horário livre.', false);
-        const r = await seguro(() => Api.agendarAdmin({ data, inicio_min: inicioSel, servico_ids, nome, whatsapp }));
+        const r = await seguro(() => Api.agendarAdmin({ data, inicio_min: inicioSel, servico_ids, nome, whatsapp, profissional_id: profSel }));
         if (!r) return;
         if (!r.ok) return toast(BJ.mensagemErro(r.erro), false);
         fecharModal();
@@ -804,8 +842,9 @@
     const dia = S.dia || hojeIso();
     S.dia = dia;
     const ehHoje = dia === hojeIso();
-    const [todos, caixa] = await Promise.all([Api.agendamentos(dia, dia), ehHoje ? Api.caixaDiario(dia).catch(() => null) : null]);
-    todos.forEach((a) => S.ag.set(String(a.id), a));
+    const [todosDia, caixa] = await Promise.all([Api.agendamentos(dia, dia), ehHoje ? Api.caixaDiario(dia).catch(() => null) : null]);
+    todosDia.forEach((a) => S.ag.set(String(a.id), a));
+    const todos = todosDia.filter(doProfFiltro);
     const ativos = todos.filter((a) => a.status === 'confirmado');
     const cancelados = todos.filter((a) => a.status === 'cancelado').length;
     const faltas = todos.filter((a) => a.status === 'falta').length;
@@ -823,6 +862,7 @@
           <input type="date" id="dash-data" value="${dia}" aria-label="Escolher dia">
           <button type="button" class="icone" data-d="1" aria-label="Próximo dia"><i data-icon="right"></i></button>
           ${ehHoje ? '' : '<button type="button" class="btn btn--sm btn--sec" data-d="0">Hoje</button>'}</div>
+          ${filtroProfHtml()}
           <button type="button" class="btn btn--solid" data-admin-agendar><i data-icon="plus"></i>Novo agendamento</button></div></div>
       ${caixa && caixa.status === 'nao_aberto' ? `<a class="aviso-barra" href="#/caixa">${BJIcons.svg('wallet')}<span><b>O caixa de hoje ainda não foi aberto.</b> Registre o troco inicial para conferir o fechamento no fim do dia.</span><span class="aviso-barra__acao">Abrir caixa</span></a>` : ''}
       <div class="kpis">
@@ -846,7 +886,10 @@
       const d = e.target.closest('[data-d]');
       if (d) { const k = Number(d.dataset.d); S.dia = k === 0 ? hojeIso() : A.addDays(S.dia, k); refazer(); }
     };
-    c.onchange = (e) => { if (e.target.id === 'dash-data' && e.target.value) { S.dia = e.target.value; refazer(); } };
+    c.onchange = (e) => {
+      if (e.target.id === 'dash-data' && e.target.value) { S.dia = e.target.value; refazer(); }
+      if (e.target.id === 'filtro-prof') { S.profAgenda = Number(e.target.value) || null; refazer(); }
+    };
   }
 
   /* ================================================================== Agenda */
@@ -856,25 +899,29 @@
     const ultimo = new Date(y, m + 1, 0).getDate();
     const p2 = (n) => String(n).padStart(2, '0');
     const prefixo = `${y}-${p2(m + 1)}`;
-    const lista = await Api.agendamentos(`${prefixo}-01`, `${prefixo}-${p2(ultimo)}`);
-    lista.forEach((a) => S.ag.set(String(a.id), a));
+    const doMes = await Api.agendamentos(`${prefixo}-01`, `${prefixo}-${p2(ultimo)}`);
+    doMes.forEach((a) => S.ag.set(String(a.id), a));
+    const lista = doMes.filter(doProfFiltro);
     const ativos = lista.filter((a) => a.status === 'confirmado');
     const porDia = {};
     ativos.forEach((a) => { porDia[a.data] = (porDia[a.data] || 0) + 1; });
     if (!S.diaAg || S.diaAg.slice(0, 7) !== prefixo) S.diaAg = hojeIso().slice(0, 7) === prefixo ? hojeIso() : `${prefixo}-01`;
+    // dia aberto: o barbeiro do filtro trabalha nele; sem filtro, pelo menos um barbeiro trabalha
+    const abreNoDia = (iso) => (S.profAgenda ? !!A.janelaDoDia(iso, horariosDoProf(S.profAgenda))
+      : profsAtivos().length ? profsAtivos().some((p) => A.janelaDoDia(iso, horariosDoProf(p.id))) : !!A.janelaDoDia(iso, D.horarios));
     const primeiro = new Date(y, m, 1).getDay();
     let cel = ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'].map((l) => `<span class="sem" aria-hidden="true">${l}</span>`).join('') + '<span class="vazio-c"></span>'.repeat(primeiro);
     for (let d = 1; d <= ultimo; d++) {
       const iso = `${prefixo}-${p2(d)}`;
       const n = porDia[iso] || 0;
-      const fechado = !A.janelaDoDia(iso, D.horarios);
+      const fechado = !abreNoDia(iso);
       cel += `<button type="button" data-dia="${iso}" class="${iso === S.diaAg ? 'sel' : ''}${iso === hojeIso() ? ' hoje' : ''}${fechado ? ' fechado' : ''}" aria-label="${esc(dataLonga(iso))}${n ? ', ' + plural(n, 'agendamento', 'agendamentos') : ''}" ${iso === S.diaAg ? 'aria-pressed="true"' : ''}>${d}${n ? `<i>${n}</i>` : ''}</button>`;
     }
     const doDia = lista.filter((a) => a.data === S.diaAg && (S.mostrarCancelados || a.status !== 'cancelado'));
     const canceladosDia = lista.filter((a) => a.data === S.diaAg && a.status === 'cancelado').length;
     const totalDia = centavos(doDia.filter((a) => a.status === 'confirmado').reduce((s, a) => s + Number(a.valor_total), 0));
     c.innerHTML = `<div class="pg-topo"><div><h1>Agenda</h1><p>Escolha um dia no calendário para ver os horários marcados.</p></div>
-        <div class="pg-acoes"><button type="button" class="btn btn--solid" data-admin-agendar><i data-icon="plus"></i>Novo agendamento</button></div></div>
+        <div class="pg-acoes">${filtroProfHtml()}<button type="button" class="btn btn--solid" data-admin-agendar><i data-icon="plus"></i>Novo agendamento</button></div></div>
       <div class="duas-col"><div class="cartao cartao__pad">
           <div class="cal-topo"><button type="button" class="icone" data-mes="-1" aria-label="Mês anterior"><i data-icon="left"></i></button><strong>${A.MESES[m]} ${y}</strong><button type="button" class="icone" data-mes="1" aria-label="Próximo mês"><i data-icon="right"></i></button></div>
           <div class="cal-adm" role="group" aria-label="Calendário">${cel}</div>
@@ -882,7 +929,7 @@
         <div class="cartao"><div class="cartao__cab"><div><h2>${esc(cap(dataLonga(S.diaAg)))}</h2><p>${plural(doDia.filter((a) => a.status === 'confirmado').length, 'agendamento', 'agendamentos')}${totalDia ? ' · ' + A.fmtBRL(totalDia) : ''}</p></div>
             ${canceladosDia || S.mostrarCancelados ? `<label class="alternar"><span class="chave"><input type="checkbox" id="ver-canc" ${S.mostrarCancelados ? 'checked' : ''}><span></span></span>Cancelados (${canceladosDia})</label>` : ''}</div>
           ${doDia.length ? `<div class="lista agenda-dia-lista">${doDia.map((a) => linhaAg(a)).join('')}</div>`
-            : vazio('calendar', A.janelaDoDia(S.diaAg, D.horarios) ? 'Nenhum agendamento neste dia' : 'A barbearia não abre neste dia', '', A.janelaDoDia(S.diaAg, D.horarios) ? '<button type="button" class="btn btn--sm btn--sec" data-admin-agendar>Agendar cliente</button>' : '')}</div></div>`;
+            : vazio('calendar', abreNoDia(S.diaAg) ? 'Nenhum agendamento neste dia' : S.profAgenda ? 'Este barbeiro não trabalha neste dia' : 'A barbearia não abre neste dia', '', abreNoDia(S.diaAg) ? '<button type="button" class="btn btn--sm btn--sec" data-admin-agendar>Agendar cliente</button>' : '')}</div></div>`;
     c.onclick = (e) => {
       if (e.target.closest('[data-admin-agendar]')) return abrirAgendamentoAdmin(S.diaAg, (dia) => { S.diaAg = dia; S.mes = { y: Number(dia.slice(0, 4)), m: Number(dia.slice(5, 7)) - 1 }; refazer(); });
       const r = e.target.closest('[data-ag]'); if (r) return detalheAg(S.ag.get(r.dataset.ag), refazer);
@@ -890,7 +937,10 @@
       const mm = e.target.closest('[data-mes]');
       if (mm) { const t = new Date(S.mes.y, S.mes.m + Number(mm.dataset.mes), 1); S.mes = { y: t.getFullYear(), m: t.getMonth() }; refazer(); }
     };
-    c.onchange = (e) => { if (e.target.id === 'ver-canc') { S.mostrarCancelados = e.target.checked; refazer(); } };
+    c.onchange = (e) => {
+      if (e.target.id === 'ver-canc') { S.mostrarCancelados = e.target.checked; refazer(); }
+      if (e.target.id === 'filtro-prof') { S.profAgenda = Number(e.target.value) || null; refazer(); }
+    };
   }
 
   /* ==================================================================== Caixa */
@@ -942,7 +992,150 @@
   }
 
   const PERIODOS = { hoje: 'Hoje', semana: 'Semana', mes: 'Mês', ano: 'Ano', total: 'Tudo' };
-  const TIPOS_MOV = { sangria: 'Sangria', despesa: 'Despesa', reforco: 'Reforço' };
+  /* ------------------------------------------------- comissões e repasses dos barbeiros */
+  const C = window.BJComissoes;
+  /** O cartão de comissões só aparece se houver mais de um barbeiro ou algum contrato que não seja de dono. */
+  const temComissao = () => D.profissionais.length > 1 || (D.contratos || []).some((x) => x.tipo !== 'dono');
+  const contratoAtual = (id) => C.contratoEm(D.contratos || [], id, hojeIso());
+  const pct = (v) => `${String(Number(v || 0)).replace('.', ',')}%`;
+  function descContrato(c) {
+    if (c.tipo === 'dono') return 'Dono / sócio · sem repasse';
+    const prod = Number(c.comissao_produtos) ? ` · ${pct(c.comissao_produtos)} dos produtos` : '';
+    if (c.tipo === 'aluguel') return `Aluguel ${A.fmtBRL(c.aluguel_valor)}/${c.aluguel_periodo === 'semana' ? 'semana' : 'mês'}${c.recebimento === 'barbeiro' ? ' · recebe direto' : ''}${prod}`;
+    return `Comissão ${pct(c.comissao_servicos)}${prod}${Number(c.valor_fixo) ? ` · fixo ${A.fmtBRL(c.valor_fixo)}/mês` : ''}`;
+  }
+  const resultadoTxt = (t) => (t > 0 ? `Repassar ${A.fmtBRL(t)}` : t < 0 ? `Deve ${A.fmtBRL(-t)}` : 'Nada a acertar');
+
+  /** Cartão do Caixa com o resultado de cada barbeiro no período escolhido. */
+  async function cartaoComissoes(box) {
+    if (!box || !temComissao()) { if (box) box.innerHTML = ''; return; }
+    const hoje = hojeIso();
+    if (!S.comDe) { S.comDe = hoje.slice(0, 8) + '01'; S.comAte = hoje; }
+    box.innerHTML = `<div class="cartao cartao__pad"><p class="slots-adm-msg"><span class="spinner" aria-hidden="true"></span>Calculando comissões…</p></div>`;
+    let ags, vales, fechs;
+    try {
+      [ags, vales, fechs] = await Promise.all([Api.agendamentos(S.comDe, S.comAte), Api.valesPendentes(), Api.fechamentos()]);
+    } catch {
+      box.innerHTML = `<div class="cartao cartao__pad"><h2>Barbeiros: comissões e repasses</h2><p class="nota">${BJIcons.svg('alert')}Não foi possível carregar as comissões. Se o painel usa o Supabase, rode o arquivo supabase/comissoes.sql no SQL Editor.</p></div>`;
+      return;
+    }
+    const linhas = D.profissionais
+      .filter((p) => p.ativo || ags.some((a) => a.profissional && a.profissional.id === p.id))
+      .map((p) => ({ p, r: C.calcular({ profissionalId: p.id, contratos: D.contratos || [], agendamentos: ags, vales, de: S.comDe, ate: S.comAte, hoje }), fechs: fechs.filter((f) => f.profissional_id === p.id) }));
+    const periodo = { de: S.comDe, ate: S.comAte };
+    box.innerHTML = `<div class="cartao"><div class="cartao__cab com-cab"><div><h2>Barbeiros: comissões e repasses</h2><p>Atendimentos realizados no período, pelo contrato que valia em cada data.</p></div>
+        <form class="com-periodo" id="form-com" novalidate><label>De<input type="date" id="com-de" value="${S.comDe}"></label><label>Até<input type="date" id="com-ate" value="${S.comAte}"></label>
+          <button class="btn btn--sm btn--sec" type="submit">Atualizar</button></form></div>
+      <div class="tabela tabela--com" role="table" aria-label="Resultado por barbeiro">
+        <div class="tabela__cab" role="row"><span role="columnheader">Barbeiro</span><span role="columnheader">Atendimentos</span><span role="columnheader">Serviços</span><span role="columnheader">Parte dele</span><span role="columnheader">Resultado</span><span role="columnheader"><span class="sr-only">Ações</span></span></div>
+        ${linhas.map(({ p, r, fechs: fs }) => {
+          const fechado = fs.some((f) => C.sobrepoe(f, periodo));
+          const dono = r.contrato.tipo === 'dono';
+          return `<div class="tabela__linha" role="row">
+            <span class="cli" role="cell"><span class="avatar avatar--sm">${esc(iniciais(p.nome))}</span><span><b>${esc(p.nome)}</b><small>${esc(descContrato(r.contrato))}</small></span></span>
+            <span role="cell" data-rot="Atendimentos">${r.atendimentos}${r.pendentes ? ` <span class="pill pill--warn" title="Atendimentos ainda não pagos pelo cliente">${r.pendentes} a receber</span>` : ''}</span>
+            <span role="cell" data-rot="Serviços">${A.fmtBRL(r.servicos)}</span>
+            <span role="cell" data-rot="Parte dele">${dono ? '—' : A.fmtBRL(r.parte)}</span>
+            <span role="cell" data-rot="Resultado"><b class="${r.total > 0 ? 'com-pagar' : r.total < 0 ? 'com-receber' : ''}">${dono && !r.total ? '—' : esc(resultadoTxt(r.total))}</b>${fechado ? ' <span class="pill pill--ok">fechado</span>' : ''}</span>
+            <span role="cell" class="tabela__acao">${dono ? '' : `<button type="button" class="btn btn--sm btn--sec" data-vale-prof="${p.id}">Vale</button>`}<button type="button" class="btn btn--sm btn--sec" data-extrato-prof="${p.id}">Extrato</button></span></div>`;
+        }).join('')}</div></div>`;
+    box.onsubmit = (e) => {
+      e.preventDefault();
+      const de = $('#com-de').value, ate = $('#com-ate').value;
+      if (!de || !ate || de > ate) return toast('Escolha um período válido.', false);
+      if (C.addDays(de, 370) < ate) return toast('Escolha um período de até um ano.', false);
+      S.comDe = de; S.comAte = ate; cartaoComissoes(box);
+    };
+    box.onclick = (e) => {
+      const v = e.target.closest('[data-vale-prof]');
+      if (v) return formVale(D.profissionais.find((p) => p.id === Number(v.dataset.valeProf)), () => refazer());
+      const x = e.target.closest('[data-extrato-prof]');
+      if (x) { const l = linhas.find((i) => i.p.id === Number(x.dataset.extratoProf)); return extratoBarbeiro(l.p, l.r, l.fechs, () => refazer()); }
+    };
+  }
+
+  /** Vale (adiantamento) para um barbeiro: sai do caixa de hoje e é descontado no próximo fechamento dele. */
+  function formVale(p, aoSalvar) {
+    abrirModal({
+      titulo: `Vale para ${p.nome}`,
+      corpo: `<p class="sub">Adiantamento que o barbeiro leva agora. Ele é descontado automaticamente no próximo fechamento. Em dinheiro, sai da gaveta.</p>
+        <div class="grade2"><div class="campo"><label for="vale-valor">Valor</label><div class="campo-moeda"><span>R$</span><input id="vale-valor" inputmode="decimal" autocomplete="off" placeholder="0,00" required></div></div>
+          <div class="campo"><label for="vale-forma">Pago com</label><select id="vale-forma">${Object.entries(FORMAS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select></div></div>
+        <div class="campo"><label for="vale-desc">Observação <span class="opcional">opcional</span></label><input id="vale-desc" maxlength="120" placeholder="Ex.: adiantamento da semana"></div>`,
+      rodape: '<button type="button" class="btn" data-fechar>Cancelar</button><button type="submit" class="btn btn--solid">Lançar vale</button>',
+      aberto() { $('#vale-valor').focus(); },
+      async enviar() {
+        const valor = centavos(numBR($('#vale-valor').value));
+        if (!(valor > 0)) { $('#vale-valor').focus(); return toast('Informe um valor maior que zero.', false); }
+        const forma = $('#vale-forma').value;
+        if (!(await seguro(() => Api.movimentoCaixa('vale', valor, forma, $('#vale-desc').value.trim(), p.id)))) return;
+        fecharModal(); toast(`Vale de ${A.fmtBRL(valor)} para ${p.nome} lançado.`); aoSalvar();
+      },
+    });
+  }
+
+  /** Extrato do barbeiro no período: atendimentos, contas, vales, fechamentos anteriores; exporta e registra o fechamento. */
+  function extratoBarbeiro(p, r, fechs, aoMudar) {
+    const periodo = { de: r.de, ate: r.ate };
+    const choque = fechs.find((f) => C.sobrepoe(f, periodo));
+    const dono = r.contrato.tipo === 'dono';
+    const conta = [
+      ['Serviços realizados', r.servicos, ''], ['Produtos vendidos na comanda', r.produtos, ''],
+      ...(dono ? [] : [['Parte dele nos atendimentos', r.parte, 'pos']]),
+      ...(r.fixo ? [['Fixo do período', r.fixo, 'pos']] : []),
+      ...(r.aluguel ? [['Aluguel da cadeira do período', -r.aluguel, 'neg']] : []),
+      ...(r.recebido_profissional ? [['Recebido direto dos clientes', -r.recebido_profissional, 'neg']] : []),
+      ...(r.vales ? [['Vales já pagos', -r.vales, 'neg']] : []),
+    ];
+    const itens = r.itens.map((i) => `<li><span>${esc(A.fmtData(i.data))} ${A.fmtMin(i.inicio_min)} · ${esc(BJ.nome(i.cliente || ''))}<small>${esc(i.servicos_nomes)}${i.produtos ? ` · produtos ${A.fmtBRL(i.produtos)}` : ''}${i.pendente ? ' · ainda não pago' : ''}</small></span><b>${dono ? A.fmtBRL(i.servicos + i.produtos) : A.fmtBRL(i.parte)}</b></li>`).join('');
+    abrirModal({
+      titulo: `Extrato de ${p.nome}`,
+      corpo: `<p class="sub">${esc(A.fmtData(r.de))} a ${esc(A.fmtData(r.ate))} · ${esc(descContrato(r.contrato))}</p>
+        ${r.pendentes ? `<p class="nota">${BJIcons.svg('alert')}${plural(r.pendentes, 'atendimento ainda não foi pago', 'atendimentos ainda não foram pagos')} pelo cliente. Eles entram na conta mesmo assim.</p>` : ''}
+        <section class="det-sec"><h3>Conta</h3><ul class="recibo">${conta.map(([t, v, cls]) => `<li class="${cls}"><span>${esc(t)}</span><b>${v < 0 ? '− ' : ''}${A.fmtBRL(Math.abs(v))}</b></li>`).join('')}
+          <li class="recibo__total"><span>${r.total >= 0 ? 'A barbearia paga a ele' : 'Ele paga à barbearia'}</span><b>${A.fmtBRL(Math.abs(r.total))}</b></li></ul></section>
+        <section class="det-sec"><h3>${plural(r.atendimentos, 'atendimento', 'atendimentos')}</h3>${itens ? `<ul class="recibo recibo--lista">${itens}</ul>` : '<p class="det-vazio">Nenhum atendimento realizado no período.</p>'}</section>
+        ${fechs.length ? `<section class="det-sec"><h3>Fechamentos anteriores</h3><ul class="recibo recibo--lista">${fechs.slice(0, 12).map((f) => `<li><span>${esc(A.fmtData(String(f.de).slice(0, 10)))} a ${esc(A.fmtData(String(f.ate).slice(0, 10)))}<small>${Number(f.total) >= 0 ? 'pago a ele' : 'pago por ele'} · ${esc(FORMAS[f.forma] || f.forma)}</small></span>
+            <b>${A.fmtBRL(Math.abs(Number(f.total)))}</b><button type="button" class="icone perigo" data-desfazer="${f.id}" aria-label="Desfazer fechamento" title="Desfazer">${BJIcons.svg('trash')}</button></li>`).join('')}</ul></section>` : ''}
+        ${choque ? `<p class="nota">${BJIcons.svg('info')}Já existe fechamento de ${esc(A.fmtData(String(choque.de).slice(0, 10)))} a ${esc(A.fmtData(String(choque.ate).slice(0, 10)))}. Para fechar de novo, escolha um período depois dele ou desfaça o anterior.</p>`
+          : !dono && r.total !== 0 ? `<div class="campo"><label for="fech-forma">${r.total > 0 ? 'Pagar com' : 'Recebido com'}</label><select id="fech-forma">${Object.entries(FORMAS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}</select>
+            <small>${r.total > 0 ? 'Em dinheiro, o valor sai da gaveta de hoje.' : 'Em dinheiro, o valor entra na gaveta de hoje.'}</small></div>` : ''}`,
+      rodape: `<button type="button" class="btn" data-fechar>Fechar</button><span class="modal__espaco"></span>
+        <button type="button" class="btn btn--sec" id="ext-csv"><i data-icon="download"></i>Exportar</button>
+        ${!choque && !dono && (r.total !== 0 || r.atendimentos) ? `<button type="button" class="btn btn--solid" id="ext-fechar">${r.total > 0 ? `Registrar pagamento de ${A.fmtBRL(r.total)}` : r.total < 0 ? `Registrar recebimento de ${A.fmtBRL(-r.total)}` : 'Fechar período'}</button>` : ''}`,
+      aberto() {
+        $('#ext-csv').addEventListener('click', () => {
+          baixarCsv(`extrato_${p.nome.split(' ')[0].toLowerCase()}_${r.de}_a_${r.ate}.csv`, ['Data', 'Hora', 'Cliente', 'Serviços', 'Valor serviços', 'Valor produtos', 'Parte do barbeiro', 'Recebido direto', 'Situação'], [
+            ...r.itens.map((i) => [csvData(i.data), A.fmtMin(i.inicio_min), BJ.nome(i.cliente || ''), i.servicos_nomes, csvNum(i.servicos), csvNum(i.produtos), csvNum(i.parte), csvNum(i.recebido_profissional), i.pendente ? 'Não pago' : 'Pago']),
+            [], ...conta.map(([t, v]) => ['', '', t, '', '', '', csvNum(v), '', '']),
+            ['', '', r.total >= 0 ? 'Total a pagar ao barbeiro' : 'Total que o barbeiro paga', '', '', '', csvNum(Math.abs(r.total)), '', ''],
+          ]);
+        });
+        const fb = $('#ext-fechar');
+        if (fb) fb.addEventListener('click', async () => {
+          const forma = $('#fech-forma') ? $('#fech-forma').value : 'dinheiro';
+          const msg = r.total > 0 ? `Registrar que ${p.nome} recebeu ${A.fmtBRL(r.total)} referentes a ${A.fmtData(r.de)} a ${A.fmtData(r.ate)}?`
+            : r.total < 0 ? `Registrar que ${p.nome} pagou ${A.fmtBRL(-r.total)} à barbearia, referentes a ${A.fmtData(r.de)} a ${A.fmtData(r.ate)}?`
+              : `Fechar o período de ${A.fmtData(r.de)} a ${A.fmtData(r.ate)} de ${p.nome} sem valores a acertar?`;
+          if (!(await confirma([msg, 'Os vales do período são baixados e o lançamento entra no caixa de hoje.'], 'Registrar', false))) return;
+          const ok = await seguro(() => Api.registrarFechamento({ profissional_id: p.id, de: r.de, ate: r.ate, atendimentos: r.atendimentos, servicos: r.servicos, produtos: r.produtos, parte: r.parte,
+            fixo: r.fixo, aluguel: r.aluguel, recebido_profissional: r.recebido_profissional, vales: r.vales, vale_ids: r.vale_ids, total: r.total, forma }));
+          if (!ok) return;
+          fecharModal(); toast(`Fechamento de ${p.nome} registrado.`); aoMudar();
+        });
+        $('#modal-corpo').onclick = async (e) => {
+          const d = e.target.closest('[data-desfazer]');
+          if (!d) return;
+          if (!(await confirma('Desfazer este fechamento? O lançamento sai do caixa e os vales voltam a ficar pendentes.', 'Desfazer'))) return;
+          if (await seguro(() => Api.excluirFechamento(Number(d.dataset.desfazer)))) { fecharModal(); toast('Fechamento desfeito.'); aoMudar(); }
+        };
+      },
+    });
+  }
+
+  const TIPOS_MOV = { sangria: 'Sangria', despesa: 'Despesa', reforco: 'Reforço', vale: 'Vale', repasse: 'Repasse', acerto: 'Acerto' };
+  /** Lançamentos que entram na gaveta (os outros saem). */
+  const ENTRADAS_MOV = ['reforco', 'acerto'];
   const AJUDA_MOV = {
     sangria: 'Dinheiro tirado da gaveta para guardar ou depositar. Não é gasto.',
     despesa: 'Um gasto da barbearia (fornecedor, lanche, material). Se foi pago em dinheiro, sai da gaveta.',
@@ -986,13 +1179,14 @@
     const aberto = cx.status === 'aberto';
     const dif = Number(cx.diferenca || 0);
     const reforcos = Number(cx.reforcos || 0);
-    const entradas = centavos(Number(cx.recebido_dinheiro || 0) + reforcos);
+    // entradas: pagamentos em dinheiro + reforços + acertos pagos por barbeiros
+    const entradas = centavos(Number(cx.recebido_dinheiro || 0) + reforcos + Number(cx.acertos_dinheiro || 0));
     const saidas = Number(cx.saidas_dinheiro ?? cx.devolvido_dinheiro ?? 0);
     const movs = cx.movimentos || [];
     // devoluções vêm dos cancelamentos; aparecem na lista para a conta da gaveta fechar
     const linhasSaida = [
-      ...movs.map((mv) => `<li class="${mv.tipo === 'reforco' ? 'pos' : 'neg'}"><span>${esc(TIPOS_MOV[mv.tipo])}${mv.descricao ? ' · ' + esc(mv.descricao) : ''}<small>${esc((quando(mv.criado_em).split(' às ')[1]) || '')}${mv.forma !== 'dinheiro' ? ' · ' + esc(FORMAS[mv.forma] || mv.forma) + ' (fora da gaveta)' : ''}</small></span>
-        <b>${mv.tipo === 'reforco' ? '+ ' : '− '}${A.fmtBRL(mv.valor)}</b>${aberto ? `<button type="button" class="icone perigo" data-excluir-mov="${mv.id}" aria-label="Excluir ${esc(TIPOS_MOV[mv.tipo].toLowerCase())} de ${A.fmtBRL(mv.valor)}" title="Excluir">${BJIcons.svg('trash')}</button>` : ''}</li>`),
+      ...movs.map((mv) => { const entra = ENTRADAS_MOV.includes(mv.tipo); return `<li class="${entra ? 'pos' : 'neg'}"><span>${esc(TIPOS_MOV[mv.tipo] || mv.tipo)}${mv.profissional_nome ? ' · ' + esc(mv.profissional_nome) : ''}${mv.descricao ? ' · ' + esc(mv.descricao) : ''}<small>${esc((quando(mv.criado_em).split(' às ')[1]) || '')}${mv.forma !== 'dinheiro' ? ' · ' + esc(FORMAS[mv.forma] || mv.forma) + ' (fora da gaveta)' : ''}${mv.fechamento_id ? ' · no fechamento' : ''}</small></span>
+        <b>${entra ? '+ ' : '− '}${A.fmtBRL(mv.valor)}</b>${aberto && !mv.fechamento_id ? `<button type="button" class="icone perigo" data-excluir-mov="${mv.id}" aria-label="Excluir ${esc((TIPOS_MOV[mv.tipo] || mv.tipo).toLowerCase())} de ${A.fmtBRL(mv.valor)}" title="Excluir">${BJIcons.svg('trash')}</button>` : ''}</li>`; }),
       ...(Number(cx.devolvido_dinheiro) > 0 ? [`<li class="neg"><span>Devoluções de cancelamentos<small>em dinheiro</small></span><b>− ${A.fmtBRL(cx.devolvido_dinheiro)}</b></li>`] : []),
     ].join('');
     const blocoMovs = `<div class="caixa-movs">
@@ -1006,7 +1200,7 @@
       <div class="conta${saidas > 0 ? ' conta--4' : ''}">
         <div><span>Troco inicial</span><b>${A.fmtBRL(cx.valor_abertura)}</b></div>
         <div class="conta__op">+</div>
-        <div><span>Entradas em dinheiro${reforcos ? ` <small>com ${A.fmtBRL(reforcos)} de reforço</small>` : ''}</span><b>${A.fmtBRL(entradas)}</b></div>
+        <div><span>Entradas em dinheiro${reforcos || Number(cx.acertos_dinheiro) ? ` <small>com ${[reforcos ? A.fmtBRL(reforcos) + ' de reforço' : '', Number(cx.acertos_dinheiro) ? A.fmtBRL(cx.acertos_dinheiro) + ' de acertos' : ''].filter(Boolean).join(' e ')}</small>` : ''}</span><b>${A.fmtBRL(entradas)}</b></div>
         ${saidas > 0 ? `<div class="conta__op">−</div>
         <div><span>Saídas</span><b>${A.fmtBRL(saidas)}</b></div>` : ''}
         <div class="conta__op">=</div>
@@ -1055,8 +1249,11 @@
           <div class="cartao cartao__pad"><h2>Como recebeu</h2>
             ${p.recebido ? `<div class="barras">${formas.map(([k, v]) => barra(FORMAS[k], Number(v), maxForma, `${A.fmtBRL(v)}<small>${p.recebido ? Math.round((v / p.recebido) * 100) : 0}%</small>`)).join('')}</div>`
               : vazio('wallet', 'Nenhum pagamento registrado', 'Registre os pagamentos no detalhe de cada agendamento.')}
-            ${Number(p.despesas) > 0 ? `<ul class="recibo caixa-saldo"><li class="neg"><span>Despesas do período</span><b>− ${A.fmtBRL(p.despesas)}</b></li>
-              <li class="recibo__total"><span>Saldo (recebido − despesas)</span><b>${A.fmtBRL(p.saldo)}</b></li></ul>` : ''}</div>
+            ${Number(p.despesas) > 0 || Number(p.repasses) > 0 || Number(p.acertos) > 0 ? `<ul class="recibo caixa-saldo">
+              ${Number(p.acertos) > 0 ? `<li class="pos"><span>Acertos pagos por barbeiros<small>aluguel e produtos</small></span><b>+ ${A.fmtBRL(p.acertos)}</b></li>` : ''}
+              ${Number(p.despesas) > 0 ? `<li class="neg"><span>Despesas do período</span><b>− ${A.fmtBRL(p.despesas)}</b></li>` : ''}
+              ${Number(p.repasses) > 0 ? `<li class="neg"><span>Pagos a barbeiros<small>vales e repasses</small></span><b>− ${A.fmtBRL(p.repasses)}</b></li>` : ''}
+              <li class="recibo__total"><span>Saldo do período</span><b>${A.fmtBRL(p.saldo)}</b></li></ul>` : ''}</div>
         </div>
         <div class="cartao cartao__pad"><h2>Serviços mais vendidos</h2>
           ${top.length ? `<div class="barras barras--ranking">${top.map((s, i) => barra(`<i class="pos-rank">${i + 1}</i>${esc(s.nome)}`, s.quantidade, maxTop, `${s.quantidade}×<small>${A.fmtBRL(s.valor)}</small>`, i === 0 ? 'barra--top' : '')).join('')}</div>`
@@ -1064,8 +1261,10 @@
     };
     c.innerHTML = `<div class="pg-topo"><div><h1>Caixa</h1><p>Abertura e fechamento do dia, faturamento e formas de pagamento.</p></div>
         <div class="pg-acoes"><button type="button" class="btn btn--sec" data-exportar-caixa><i data-icon="download"></i>Exportar</button><button type="button" class="btn btn--solid" data-venda-avulsa><i data-icon="box"></i>Venda avulsa</button></div></div>
-      ${cartaoCaixaDia(caixaDia, dia)}${cartaoVendasAvulsas(vendas, caixaDia.status === 'fechado')}<div id="caixa-periodo"></div>`;
+      ${cartaoCaixaDia(caixaDia, dia)}${cartaoVendasAvulsas(vendas, caixaDia.status === 'fechado')}<div id="caixa-periodo"></div><div id="caixa-comissoes"></div>`;
     render();
+    // carrega à parte: se falhar (SQL novo ainda não rodado no Supabase), o resto do Caixa continua funcionando
+    cartaoComissoes($('#caixa-comissoes'));
     c.onclick = async (e) => {
       if (e.target.closest('[data-venda-avulsa]')) return formVendaAvulsa(() => refazer());
       if (e.target.closest('[data-exportar-caixa]')) return formExportarCaixa();
@@ -1531,6 +1730,140 @@
 
   /* ============================================================ Horários */
   const nomeDia = (d) => A.DIAS[d] + (d === 6 || d === 0 ? '' : '-feira');
+  /* ========================================================== Barbeiros */
+  async function vBarbeiros(c) {
+    const lista = D.profissionais.slice().sort((a, b) => (b.ativo - a.ativo) || a.ordem - b.ordem || a.id - b.id);
+    // o banco sempre tem ao menos um barbeiro; lista vazia = tabela ainda não criada no Supabase
+    if (!lista.length) {
+      c.innerHTML = `<div class="pg-topo"><div><h1>Barbeiros</h1></div></div>
+        <div class="cartao cartao__pad"><p class="nota">${BJIcons.svg('alert')}O banco de dados ainda não foi atualizado para vários barbeiros. Rode o arquivo <b>supabase/barbeiros.sql</b> em Supabase &gt; SQL Editor e recarregue esta página. O primeiro barbeiro (Juan) é criado automaticamente, com todos os agendamentos que já existem.</p></div>`;
+      return;
+    }
+    c.innerHTML = `<div class="pg-topo"><div><h1>Barbeiros</h1><p>Quem atende na barbearia. Cada agendamento fica com um barbeiro, e dois clientes só podem ser marcados no mesmo horário com barbeiros diferentes.</p></div>
+        <div class="pg-acoes"><button type="button" class="btn btn--solid" data-novo-prof><i data-icon="plus"></i>Novo barbeiro</button></div></div>
+      ${profsAtivos().length <= 1 ? `<p class="nota">${BJIcons.svg('info')}Com um barbeiro só, o painel e o site funcionam como sempre. Ao cadastrar o segundo, aparecem a escolha de barbeiro no agendamento e o filtro na agenda.</p>` : ''}
+      <div class="cartao">${lista.length ? `<div class="lista">${lista.map((p) => `<div class="item" style="grid-template-columns:auto minmax(0,1fr) auto">
+          <span class="avatar avatar--sm">${esc(iniciais(p.nome))}</span>
+          <div><div class="item__nome">${esc(p.nome)}</div><div class="item__meta">${!p.ativo ? 'Desativado · não recebe novos agendamentos'
+            : p.horarios && p.horarios.length ? `Horário próprio · ${ordemDias.filter((d) => (p.horarios.find((h) => h.dia_semana === d) || {}).ativo).map((d) => A.DIAS_CURTOS[d]).join(', ') || 'nenhum dia'}`
+            : 'Segue o horário da barbearia'}</div></div>
+          <span style="display:flex;gap:6px;align-items:center">${pill(p.ativo ? ['Ativo', 'ok'] : ['Inativo', 'muted'])}
+            <button type="button" class="icone icone--editar" data-editar-prof="${p.id}" aria-label="Editar ${esc(p.nome)}">${BJIcons.svg('edit')}</button>
+            <button type="button" class="icone perigo" data-del-prof="${p.id}" aria-label="Excluir ${esc(p.nome)}">${BJIcons.svg('trash')}</button></span></div>`).join('')}</div>`
+        : '<p class="vazio">Nenhum barbeiro cadastrado.</p>'}</div>`;
+    c.onclick = async (e) => {
+      if (e.target.closest('[data-novo-prof]')) return formBarbeiro(null);
+      const ed = e.target.closest('[data-editar-prof]');
+      if (ed) return formBarbeiro(D.profissionais.find((p) => p.id === Number(ed.dataset.editarProf)));
+      const del = e.target.closest('[data-del-prof]');
+      if (del) {
+        const p = D.profissionais.find((x) => x.id === Number(del.dataset.delProf));
+        if (!(await confirma(`Excluir ${p.nome}? Se já tiver atendimentos registrados, não será possível; nesse caso, desative.`, 'Excluir'))) return;
+        if (await seguro(() => Api.excluir('profissionais', p.id).then(() => true))) { await recarregar(); toast('Barbeiro excluído.'); refazer(); }
+      }
+    };
+  }
+  /** Cria (p = null) ou edita um barbeiro, com o horário próprio opcional. */
+  function formBarbeiro(p) {
+    const novo = !p;
+    const proprio = !novo && p.horarios && p.horarios.length > 0;
+    // a grade começa com o horário próprio dele ou, se não tiver, com o da barbearia
+    const base = proprio ? p.horarios : D.horarios;
+    const dia = (d) => base.find((x) => x.dia_semana === d) || { dia_semana: d, ativo: false, inicio_min: 480, fim_min: 1080 };
+    // contrato atual (barbeiro novo começa como comissão de 0%)
+    const ct = novo ? { ...C.PADRAO } : contratoAtual(p.id);
+    abrirModal({
+      titulo: novo ? 'Novo barbeiro' : 'Editar barbeiro',
+      corpo: `<div class="campo"><label for="prof-nome">Nome</label><input id="prof-nome" maxlength="60" autocomplete="off" value="${esc(novo ? '' : p.nome)}" placeholder="Como aparece para o cliente" required></div>
+        <div class="grade2"><div class="campo"><label for="prof-ordem">Posição na lista</label><input id="prof-ordem" type="number" min="0" max="99" value="${esc(novo ? (D.profissionais.length + 1) : p.ordem)}">
+            <small>O primeiro da lista é o padrão quando ninguém é escolhido.</small></div>
+          <div class="campo"><span class="rotulo">Atendendo</span><label class="chave" style="margin-top:6px"><input type="checkbox" id="prof-ativo" ${novo || p.ativo ? 'checked' : ''} aria-label="Atendendo"><span></span></label>
+            <small>Desativado não recebe novos agendamentos.</small></div></div>
+        <section class="det-sec"><div class="det-sec__topo"><h3>Horário de trabalho</h3>
+            <label class="alternar"><span class="chave"><input type="checkbox" id="prof-proprio" ${proprio ? 'checked' : ''}><span></span></span>Horário próprio</label></div>
+          <p class="sub" id="prof-hor-ajuda">${proprio ? 'Os clientes só conseguem marcar com este barbeiro nos dias e horas abaixo.' : 'Segue o horário da barbearia (Ajustes → Horários). Ative para definir dias e horas só dele.'}</p>
+          <div class="dias" id="prof-dias" ${proprio ? '' : 'hidden'}>${ordemDias.map((d) => { const x = dia(d); return `
+            <div class="dia-linha${x.ativo ? '' : ' fechado'}" data-d="${d}"><label class="chave"><input type="checkbox" class="h-ativo" ${x.ativo ? 'checked' : ''} aria-label="${A.DIAS[d]}: trabalha"><span></span></label>
+              <span class="nome-dia">${A.DIAS[d]}</span>
+              <input type="time" class="h-ini" value="${A.fmtMin(x.inicio_min)}" aria-label="${A.DIAS[d]}: começa às" ${x.ativo ? '' : 'disabled'}>
+              <input type="time" class="h-fim" value="${A.fmtMin(x.fim_min)}" aria-label="${A.DIAS[d]}: termina às" ${x.ativo ? '' : 'disabled'}></div>`; }).join('')}</div></section>
+        <section class="det-sec"><h3>Contrato</h3>
+          <div class="campo"><label for="ct-tipo">Como ele trabalha</label><select id="ct-tipo">
+            ${[['comissao', 'Comissão (% do que ele faz)'], ['aluguel', 'Aluguel de cadeira (valor fixo)'], ['dono', 'Dono / sócio (sem repasse)']].map(([k, v]) => `<option value="${k}" ${ct.tipo === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+          <div data-ct="comissao" ${ct.tipo === 'comissao' ? '' : 'hidden'}><div class="grade3">
+            <div class="campo"><label for="ct-cs">% dos serviços</label><input id="ct-cs" type="number" min="0" max="100" step="0.5" value="${esc(ct.comissao_servicos)}"></div>
+            <div class="campo"><label for="ct-cp">% dos produtos</label><input id="ct-cp" type="number" min="0" max="100" step="0.5" value="${esc(ct.comissao_produtos)}"></div>
+            <div class="campo"><label for="ct-fixo">Fixo por mês <span class="opcional">opcional</span></label><div class="campo-moeda"><span>R$</span><input id="ct-fixo" inputmode="decimal" value="${Number(ct.valor_fixo) ? fmtNum(Number(ct.valor_fixo).toFixed(2)) : ''}" placeholder="0,00"></div></div></div>
+            <small class="ct-ajuda">Ele recebe a % do valor final de cada atendimento (com desconto ou adicional) e dos produtos que vender na comanda, mais o fixo, se houver.</small></div>
+          <div data-ct="aluguel" ${ct.tipo === 'aluguel' ? '' : 'hidden'}><div class="grade3">
+            <div class="campo"><label for="ct-aluguel">Aluguel</label><div class="campo-moeda"><span>R$</span><input id="ct-aluguel" inputmode="decimal" value="${Number(ct.aluguel_valor) ? fmtNum(Number(ct.aluguel_valor).toFixed(2)) : ''}" placeholder="0,00"></div></div>
+            <div class="campo"><label for="ct-periodo">Por</label><select id="ct-periodo"><option value="mes" ${ct.aluguel_periodo !== 'semana' ? 'selected' : ''}>Mês</option><option value="semana" ${ct.aluguel_periodo === 'semana' ? 'selected' : ''}>Semana</option></select></div>
+            <div class="campo"><label for="ct-cp2">% dos produtos</label><input id="ct-cp2" type="number" min="0" max="100" step="0.5" value="${esc(ct.comissao_produtos)}"></div></div>
+            <div class="campo"><label for="ct-receb">Quem recebe do cliente</label><select id="ct-receb">
+              <option value="caixa" ${ct.recebimento !== 'barbeiro' ? 'selected' : ''}>A barbearia (pelo caixa) e repassa a ele</option>
+              <option value="barbeiro" ${ct.recebimento === 'barbeiro' ? 'selected' : ''}>Ele recebe direto (não entra no caixa)</option></select></div>
+            <small class="ct-ajuda">Ele fica com 100% dos serviços e paga o aluguel. Os produtos são da barbearia; ele pode ganhar uma % sobre os que vender.</small></div>
+          <div data-ct="dono" ${ct.tipo === 'dono' ? '' : 'hidden'}><small class="ct-ajuda">Tudo o que ele atende fica com a barbearia; não há repasse.</small></div>
+          ${novo ? '' : `<div class="campo"><label for="ct-desde">Mudança vale a partir de</label><input type="date" id="ct-desde" value="${hojeIso()}">
+            <small>Atendimentos antes dessa data continuam com o contrato anterior (${esc(descContrato(ct))}).</small></div>`}</section>`,
+      rodape: `<button type="button" class="btn" data-fechar>Cancelar</button><button type="submit" class="btn btn--solid">${novo ? 'Cadastrar' : 'Salvar'}</button>`,
+      aberto() {
+        $('#prof-nome').focus();
+        $('#modal-corpo').onchange = (e) => {
+          const t = e.target;
+          if (t.id === 'prof-proprio') {
+            $('#prof-dias').hidden = !t.checked;
+            $('#prof-hor-ajuda').textContent = t.checked ? 'Os clientes só conseguem marcar com este barbeiro nos dias e horas abaixo.' : 'Segue o horário da barbearia (Ajustes → Horários). Ative para definir dias e horas só dele.';
+          }
+          if (t.classList.contains('h-ativo')) {
+            const l = t.closest('.dia-linha'); l.classList.toggle('fechado', !t.checked);
+            $$('input[type="time"]', l).forEach((i) => { i.disabled = !t.checked; });
+          }
+          if (t.id === 'ct-tipo') $$('[data-ct]').forEach((b) => { b.hidden = b.dataset.ct !== t.value; });
+        };
+      },
+      async enviar() {
+        const nome = BJ.nome($('#prof-nome').value);
+        if (!nome) { $('#prof-nome').focus(); return toast('Informe o nome do barbeiro.', false); }
+        const ordem = Math.max(0, Math.round(Number($('#prof-ordem').value) || 0));
+        const usarProprio = $('#prof-proprio').checked;
+        const horarios = usarProprio ? $$('#prof-dias .dia-linha').map((l) => ({ dia_semana: Number(l.dataset.d), ativo: $('.h-ativo', l).checked, inicio_min: A.toMin($('.h-ini', l).value), fim_min: A.toMin($('.h-fim', l).value) })) : [];
+        for (const h of horarios) {
+          if (!h.ativo) continue;
+          if (isNaN(h.inicio_min) || isNaN(h.fim_min) || h.fim_min <= h.inicio_min) return toast(`${A.DIAS[h.dia_semana]}: o horário final precisa ser depois do inicial.`, false);
+        }
+        if (usarProprio && !horarios.some((h) => h.ativo)) return toast('Marque pelo menos um dia de trabalho, ou desative o horário próprio.', false);
+        // contrato: só grava se mudou algo
+        const tipo = $('#ct-tipo').value;
+        const pcNum = (sel) => { const v = Number(String($(sel).value).replace(',', '.')); return Number.isFinite(v) ? Math.round(v * 100) / 100 : NaN; };
+        const novoCt = {
+          tipo,
+          comissao_servicos: tipo === 'comissao' ? pcNum('#ct-cs') : 0,
+          comissao_produtos: tipo === 'comissao' ? pcNum('#ct-cp') : tipo === 'aluguel' ? pcNum('#ct-cp2') : 0,
+          valor_fixo: tipo === 'comissao' ? centavos(numBR($('#ct-fixo').value) ?? 0) : 0,
+          aluguel_valor: tipo === 'aluguel' ? centavos(numBR($('#ct-aluguel').value) ?? 0) : 0,
+          aluguel_periodo: tipo === 'aluguel' ? $('#ct-periodo').value : 'mes',
+          recebimento: tipo === 'aluguel' ? $('#ct-receb').value : 'caixa',
+        };
+        if ([novoCt.comissao_servicos, novoCt.comissao_produtos].some((v) => !(v >= 0 && v <= 100))) return toast('As porcentagens vão de 0 a 100.', false);
+        if (!(novoCt.valor_fixo >= 0)) return toast('Confira o valor fixo.', false);
+        if (tipo === 'aluguel' && !(novoCt.aluguel_valor > 0)) { $('#ct-aluguel').focus(); return toast('Informe o valor do aluguel da cadeira.', false); }
+        const mudouCt = novo || ['tipo', 'comissao_servicos', 'comissao_produtos', 'valor_fixo', 'aluguel_valor', 'aluguel_periodo', 'recebimento'].some((k) => String(novoCt[k]) !== String(ct[k] ?? C.PADRAO[k]));
+        const desde = novo ? '2000-01-01' : $('#ct-desde').value;
+        if (mudouCt && !novo && !desde) { $('#ct-desde').focus(); return toast('Informe a partir de quando vale o novo contrato.', false); }
+        const linha = { ...(novo ? {} : { id: p.id }), nome, ordem, ativo: $('#prof-ativo').checked };
+        const salvo = await seguro(() => Api.salvar('profissionais', linha));
+        if (!salvo) return;
+        // só grava o horário se mudou algo (barbeiro novo sem horário próprio não precisa)
+        if ((usarProprio || proprio) && !(await seguro(() => Api.salvarHorariosProf(salvo.id, horarios).then(() => true)))) { await recarregar(); return; }
+        if (mudouCt && !(await seguro(() => Api.salvarContrato({ profissional_id: salvo.id, vigente_desde: desde, ...novoCt }).then(() => true)))) { await recarregar(); return; }
+        fecharModal(); await recarregar();
+        toast(novo ? `${nome} cadastrado.${profsAtivos().length === 2 ? ' Agora a agenda mostra o barbeiro de cada horário.' : ''}` : 'Barbeiro salvo.');
+        refazer();
+      },
+    });
+  }
+
   async function vHorarios(c) {
     const cfg = D.config;
     const h = (d) => D.horarios.find((x) => x.dia_semana === d) || { dia_semana: d, ativo: false, inicio_min: 480, fim_min: 1080 };
@@ -1590,11 +1923,12 @@
           <div class="campo"><label for="b-ini">De</label><input type="time" id="b-ini" value="15:00"></div>
           <div class="campo"><label for="b-fim">Até</label><input type="time" id="b-fim" value="16:30"></div></div>
         <div class="campo"><label style="display:flex;align-items:center;gap:10px"><span class="chave"><input type="checkbox" id="b-dia"><span></span></span>Bloquear o dia inteiro</label></div>
+        ${variosProfs() ? `<div class="campo"><label for="b-prof">Vale para</label><select id="b-prof"><option value="">Toda a barbearia</option>${profsAtivos().map((p) => `<option value="${p.id}">Só ${esc(p.nome)} (folga ou compromisso)</option>`).join('')}</select></div>` : ''}
         <div class="campo"><label for="b-motivo">Motivo (só você vê)</label><input id="b-motivo" maxlength="120" placeholder="Ex.: Compromisso pessoal"></div>
         <button class="btn btn--solid" type="submit">Bloquear período</button></form>
       <div class="cartao" style="margin-top:16px"><div class="cartao__pad" style="display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--line)"><h2 style="margin:0">Bloqueios ${S.mostrarPassados ? '' : 'futuros'}</h2>
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)"><span class="chave"><input type="checkbox" id="b-passados" ${S.mostrarPassados ? 'checked' : ''}><span></span></span>Mostrar passados</label></div>
-        ${lista.length ? `<div class="lista">${lista.map((b) => `<div class="item" style="grid-template-columns:minmax(0,1fr) auto"><div><div class="item__nome">${A.fmtData(b.data)} · ${b.inicio_min === 0 && b.fim_min === 1440 ? 'Dia inteiro' : A.fmtMin(b.inicio_min) + ' às ' + A.fmtMin(b.fim_min)}</div><div class="item__meta">${esc(cap(dataLonga(b.data)))}${b.motivo ? ' · ' + esc(b.motivo) : ''}</div></div>
+        ${lista.length ? `<div class="lista">${lista.map((b) => `<div class="item" style="grid-template-columns:minmax(0,1fr) auto"><div><div class="item__nome">${A.fmtData(b.data)} · ${b.inicio_min === 0 && b.fim_min === 1440 ? 'Dia inteiro' : A.fmtMin(b.inicio_min) + ' às ' + A.fmtMin(b.fim_min)}</div><div class="item__meta">${esc(cap(dataLonga(b.data)))}${b.profissional_id ? ' · só ' + esc((D.profissionais.find((p) => p.id === b.profissional_id) || {}).nome || 'barbeiro') : variosProfs() ? ' · toda a barbearia' : ''}${b.motivo ? ' · ' + esc(b.motivo) : ''}</div></div>
           <button class="icone perigo" data-del="${b.id}" aria-label="Remover bloqueio de ${A.fmtData(b.data)}"><i data-icon="trash"></i></button></div>`).join('')}</div>` : '<p class="vazio">Nenhum bloqueio.</p>'}</div>`;
     c.onchange = (e) => {
       if (e.target.id === 'b-dia') $$('#b-ini, #b-fim').forEach((i) => { i.disabled = e.target.checked; });
@@ -1612,9 +1946,11 @@
       const ini = inteiro ? 0 : A.toMin($('#b-ini').value), fim = inteiro ? 1440 : A.toMin($('#b-fim').value);
       if (!data) return toast('Escolha a data.', false);
       if (isNaN(ini) || isNaN(fim) || fim <= ini) return toast('O horário final precisa ser depois do inicial.', false);
+      const profId = $('#b-prof') && $('#b-prof').value ? Number($('#b-prof').value) : null;
       const ok = await seguro(async () => {
-        await Api.salvar('bloqueios', { data, inicio_min: ini, fim_min: fim, motivo: $('#b-motivo').value.trim() });
-        const ags = (await Api.agendamentos(data, data)).filter((a) => a.status === 'confirmado' && a.inicio_min < fim && ini < a.fim_min);
+        await Api.salvar('bloqueios', { data, inicio_min: ini, fim_min: fim, motivo: $('#b-motivo').value.trim(), ...(profId ? { profissional_id: profId } : {}) });
+        const ags = (await Api.agendamentos(data, data)).filter((a) => a.status === 'confirmado' && a.inicio_min < fim && ini < a.fim_min
+          && (!profId || !a.profissional || a.profissional.id === profId));
         return { conflitos: ags.length };
       }, 'Não foi possível bloquear.');
       if (!ok) return;

@@ -129,12 +129,48 @@ CREATE TABLE IF NOT EXISTS remarcacoes (
   data_nova TEXT NOT NULL, inicio_novo INTEGER NOT NULL,
   criado_em TEXT NOT NULL DEFAULT (datetime('now','localtime')));
 CREATE INDEX IF NOT EXISTS idx_remarcacoes_ag ON remarcacoes (agendamento_id);
+CREATE TABLE IF NOT EXISTS profissionais (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, foto TEXT NOT NULL DEFAULT '',
+  ativo INTEGER NOT NULL DEFAULT 1, ordem INTEGER NOT NULL DEFAULT 0,
+  comissao_servicos REAL NOT NULL DEFAULT 0 CHECK (comissao_servicos BETWEEN 0 AND 100),
+  comissao_produtos REAL NOT NULL DEFAULT 0 CHECK (comissao_produtos BETWEEN 0 AND 100),
+  criado_em TEXT NOT NULL DEFAULT (datetime('now','localtime')));
+CREATE TABLE IF NOT EXISTS profissional_horarios (
+  profissional_id INTEGER NOT NULL REFERENCES profissionais(id) ON DELETE CASCADE,
+  dia_semana INTEGER NOT NULL CHECK (dia_semana BETWEEN 0 AND 6), ativo INTEGER NOT NULL DEFAULT 1,
+  inicio_min INTEGER NOT NULL, fim_min INTEGER NOT NULL CHECK (fim_min > inicio_min AND inicio_min >= 0 AND fim_min <= 1440),
+  PRIMARY KEY (profissional_id, dia_semana));
+CREATE TABLE IF NOT EXISTS profissional_contratos (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  profissional_id INTEGER NOT NULL REFERENCES profissionais(id) ON DELETE CASCADE,
+  vigente_desde TEXT NOT NULL,
+  tipo TEXT NOT NULL CHECK (tipo IN ('dono','comissao','aluguel')),
+  comissao_servicos REAL NOT NULL DEFAULT 0 CHECK (comissao_servicos BETWEEN 0 AND 100),
+  comissao_produtos REAL NOT NULL DEFAULT 0 CHECK (comissao_produtos BETWEEN 0 AND 100),
+  valor_fixo REAL NOT NULL DEFAULT 0 CHECK (valor_fixo >= 0),
+  aluguel_valor REAL NOT NULL DEFAULT 0 CHECK (aluguel_valor >= 0),
+  aluguel_periodo TEXT NOT NULL DEFAULT 'mes' CHECK (aluguel_periodo IN ('semana','mes')),
+  recebimento TEXT NOT NULL DEFAULT 'caixa' CHECK (recebimento IN ('caixa','barbeiro')),
+  criado_em TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  UNIQUE (profissional_id, vigente_desde));
+CREATE TABLE IF NOT EXISTS fechamentos (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  profissional_id INTEGER NOT NULL REFERENCES profissionais(id),
+  de TEXT NOT NULL, ate TEXT NOT NULL,
+  atendimentos INTEGER NOT NULL DEFAULT 0, servicos REAL NOT NULL DEFAULT 0, produtos REAL NOT NULL DEFAULT 0,
+  parte REAL NOT NULL DEFAULT 0, fixo REAL NOT NULL DEFAULT 0, aluguel REAL NOT NULL DEFAULT 0,
+  recebido_profissional REAL NOT NULL DEFAULT 0, vales REAL NOT NULL DEFAULT 0, total REAL NOT NULL,
+  forma TEXT NOT NULL DEFAULT 'dinheiro' CHECK (forma IN ('dinheiro','pix','cartao','outro')),
+  observacao TEXT NOT NULL DEFAULT '',
+  criado_em TEXT NOT NULL DEFAULT (datetime('now','localtime')));
 CREATE TABLE IF NOT EXISTS movimentos_caixa (
   id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL,
-  tipo TEXT NOT NULL CHECK (tipo IN ('sangria','despesa','reforco')),
+  tipo TEXT NOT NULL CHECK (tipo IN ('sangria','despesa','reforco','vale','repasse','acerto')),
   valor REAL NOT NULL CHECK (valor > 0),
   forma TEXT NOT NULL DEFAULT 'dinheiro' CHECK (forma IN ('dinheiro','pix','cartao','outro')),
   descricao TEXT NOT NULL DEFAULT '',
+  profissional_id INTEGER REFERENCES profissionais(id),
+  fechamento_id INTEGER REFERENCES fechamentos(id) ON DELETE SET NULL,
   criado_em TEXT NOT NULL DEFAULT (datetime('now','localtime')));
 CREATE INDEX IF NOT EXISTS idx_movimentos_caixa_data ON movimentos_caixa (data);
 `);
@@ -189,6 +225,57 @@ try {
       db.exec('PRAGMA foreign_keys = ON');
     }
   }
+}
+// vários barbeiros: cada agendamento e bloqueio tem um profissional (bloqueio sem profissional = barbearia toda).
+// Banco antigo: o primeiro barbeiro é criado e recebe todos os agendamentos que já existem.
+{
+  const colsAg = db.prepare('PRAGMA table_info(agendamentos)').all().map((c) => c.name);
+  if (!colsAg.includes('profissional_id')) db.exec('ALTER TABLE agendamentos ADD COLUMN profissional_id INTEGER REFERENCES profissionais(id)');
+  const colsBl = db.prepare('PRAGMA table_info(bloqueios)').all().map((c) => c.name);
+  if (!colsBl.includes('profissional_id')) db.exec('ALTER TABLE bloqueios ADD COLUMN profissional_id INTEGER REFERENCES profissionais(id) ON DELETE CASCADE');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_agend_prof ON agendamentos (profissional_id, data, status)');
+  if (!db.prepare('SELECT 1 FROM profissionais LIMIT 1').get()) db.prepare("INSERT INTO profissionais (nome, ordem) VALUES ('Juan', 1)").run();
+  db.exec('UPDATE agendamentos SET profissional_id = (SELECT id FROM profissionais ORDER BY ordem, id LIMIT 1) WHERE profissional_id IS NULL');
+}
+// comissões: contrato inicial (o primeiro barbeiro é o dono; os outros, comissão), quem recebeu cada pagamento
+// e os lançamentos de caixa ligados a barbeiro (vale, repasse, acerto)
+{
+  if (!db.prepare('SELECT 1 FROM profissional_contratos LIMIT 1').get()) {
+    const primeiro = db.prepare('SELECT id FROM profissionais ORDER BY ordem, id LIMIT 1').get();
+    for (const p of db.prepare('SELECT * FROM profissionais').all()) {
+      db.prepare("INSERT INTO profissional_contratos (profissional_id, vigente_desde, tipo, comissao_servicos, comissao_produtos) VALUES (?, '2000-01-01', ?, ?, ?)")
+        .run(p.id, primeiro && p.id === primeiro.id ? 'dono' : 'comissao', p.comissao_servicos || 0, p.comissao_produtos || 0);
+    }
+  }
+  const colsRec = db.prepare('PRAGMA table_info(recebimentos_agendamento)').all().map((c) => c.name);
+  if (!colsRec.includes('recebido_por')) {
+    db.exec("ALTER TABLE recebimentos_agendamento ADD COLUMN recebido_por TEXT NOT NULL DEFAULT 'barbearia' CHECK (recebido_por IN ('barbearia','profissional'))");
+  }
+  // o SQLite não altera um CHECK existente: a tabela de movimentos é recriada uma única vez com os tipos novos
+  const defMov = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'movimentos_caixa'").get().sql;
+  if (!defMov.includes("'vale'")) {
+    db.exec('BEGIN');
+    try {
+      db.exec(`CREATE TABLE movimentos_caixa_novo (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL,
+        tipo TEXT NOT NULL CHECK (tipo IN ('sangria','despesa','reforco','vale','repasse','acerto')),
+        valor REAL NOT NULL CHECK (valor > 0),
+        forma TEXT NOT NULL DEFAULT 'dinheiro' CHECK (forma IN ('dinheiro','pix','cartao','outro')),
+        descricao TEXT NOT NULL DEFAULT '',
+        profissional_id INTEGER REFERENCES profissionais(id),
+        fechamento_id INTEGER REFERENCES fechamentos(id) ON DELETE SET NULL,
+        criado_em TEXT NOT NULL DEFAULT (datetime('now','localtime')))`);
+      db.exec('INSERT INTO movimentos_caixa_novo (id, data, tipo, valor, forma, descricao, criado_em) SELECT id, data, tipo, valor, forma, descricao, criado_em FROM movimentos_caixa');
+      db.exec('DROP TABLE movimentos_caixa');
+      db.exec('ALTER TABLE movimentos_caixa_novo RENAME TO movimentos_caixa');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_movimentos_caixa_data ON movimentos_caixa (data)');
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_movimentos_caixa_prof ON movimentos_caixa (profissional_id, fechamento_id)');
 }
 
 /* --------------------------------------------------------------- dados base */
@@ -284,30 +371,62 @@ function siteData(admin) {
     combos: getCombos(!admin),
     horarios: todos('SELECT * FROM horarios_funcionamento ORDER BY dia_semana'),
     galeria: todos(`SELECT * FROM galeria ${w} ORDER BY ordem, id`),
+    // o site só precisa de nome/foto dos ativos; comissão é dado do painel
+    profissionais: admin ? todos('SELECT * FROM profissionais ORDER BY ordem, id')
+      : todos('SELECT id, nome, foto, ordem FROM profissionais WHERE ativo = 1 ORDER BY ordem, id'),
   };
+  // cada barbeiro leva o horário próprio (vazio = segue o da barbearia)
+  const hp = todos('SELECT * FROM profissional_horarios ORDER BY profissional_id, dia_semana');
+  out.profissionais.forEach((p) => { p.horarios = hp.filter((h) => h.profissional_id === p.id).map(({ profissional_id, ...h }) => h); });
   if (admin) {
+    // histórico de contratos (comissão, aluguel): o painel calcula cada atendimento pelo contrato da data dele
+    out.contratos = todos('SELECT * FROM profissional_contratos ORDER BY profissional_id, vigente_desde');
     out.bloqueios = todos('SELECT * FROM bloqueios ORDER BY data, inicio_min');
     out.produtos = todos('SELECT * FROM produtos ORDER BY nome COLLATE NOCASE');
   }
   return out;
 }
-function indisponiveis(data) {
-  return [
-    ...db.prepare("SELECT inicio_min ini, fim_min fim FROM agendamentos WHERE data = ? AND status = 'confirmado'").all(data),
-    ...db.prepare('SELECT inicio_min ini, fim_min fim FROM bloqueios WHERE data = ?').all(data),
-  ].map((r) => ({ ...r }));
+/* ----------------------------------------------------------- profissionais */
+/** Primeiro barbeiro ativo (o site público agenda com ele enquanto não há escolha de barbeiro). */
+function profissionalPadrao() {
+  return db.prepare('SELECT * FROM profissionais WHERE ativo = 1 ORDER BY ordem, id LIMIT 1').get() || null;
+}
+/** Barbeiro informado (precisa estar ativo) ou o padrão. Devolve null se não houver nenhum. */
+function resolverProfissional(id) {
+  if (id == null || id === '') return profissionalPadrao();
+  return db.prepare('SELECT * FROM profissionais WHERE id = ? AND ativo = 1').get(Number(id)) || null;
+}
+/** Expediente semanal do barbeiro: o próprio, se tiver; senão, o da barbearia. */
+function horariosDe(profissionalId) {
+  const proprios = todos('SELECT dia_semana, ativo, inicio_min, fim_min FROM profissional_horarios WHERE profissional_id = ? ORDER BY dia_semana', profissionalId);
+  return proprios.length ? proprios : todos('SELECT * FROM horarios_funcionamento');
+}
+/** Agendamentos confirmados do barbeiro no dia, como intervalos (ignorarId = o próprio, ao reagendar). */
+function ocupadosDe(data, profissionalId, ignorarId = 0) {
+  return db.prepare("SELECT inicio_min ini, fim_min fim FROM agendamentos WHERE data = ? AND status = 'confirmado' AND profissional_id = ? AND id <> ?")
+    .all(data, profissionalId, ignorarId).map((o) => ({ ...o }));
+}
+/** Bloqueios do dia que valem para o barbeiro: os dele e os da barbearia toda. */
+function bloqueiosDe(data, profissionalId) {
+  return todos('SELECT * FROM bloqueios WHERE data = ? AND (profissional_id IS NULL OR profissional_id = ?)', data, profissionalId);
+}
+function indisponiveis(data, profissionalId) {
+  const prof = resolverProfissional(profissionalId);
+  if (!prof) return [];
+  return [...ocupadosDe(data, prof.id), ...bloqueiosDe(data, prof.id).map((b) => ({ ini: b.inicio_min, fim: b.fim_min }))];
 }
 function formatarAgendamento(a) {
   const cli = db.prepare('SELECT nome, whatsapp FROM clientes WHERE id = ?').get(a.cliente_id);
   if (cli) cli.nome = padronizarNome(cli.nome);
   const servicos = db.prepare('SELECT nome, duracao_min, preco FROM agendamento_servicos WHERE agendamento_id = ? ORDER BY id').all(a.id).map((s) => ({ ...s }));
   const produtos = db.prepare('SELECT nome, quantidade, preco_unitario, valor_total FROM agendamento_produtos WHERE agendamento_id = ? ORDER BY id').all(a.id).map((p) => ({ ...p }));
-  const pagamentos = db.prepare('SELECT id, valor, forma, recebido_em FROM recebimentos_agendamento WHERE agendamento_id = ? ORDER BY recebido_em, id').all(a.id).map((p) => ({ ...p, valor: Number(p.valor) }));
+  const pagamentos = db.prepare('SELECT id, valor, forma, recebido_em, recebido_por FROM recebimentos_agendamento WHERE agendamento_id = ? ORDER BY recebido_em, id').all(a.id).map((p) => ({ ...p, valor: Number(p.valor) }));
   const totalPago = Math.round(pagamentos.reduce((s, p) => s + p.valor, 0) * 100) / 100;
   const estornos = db.prepare('SELECT id, valor, forma, criado_em FROM estornos WHERE agendamento_id = ? ORDER BY id').all(a.id).map((e) => ({ ...e, valor: Number(e.valor) }));
   const remarcacoes = db.prepare('SELECT data_anterior, inicio_anterior, data_nova, inicio_novo, criado_em FROM remarcacoes WHERE agendamento_id = ? ORDER BY id').all(a.id).map((r) => ({ ...r }));
+  const prof = a.profissional_id ? db.prepare('SELECT id, nome FROM profissionais WHERE id = ?').get(a.profissional_id) : null;
   const { cliente_id, ...resto } = a;
-  return { ...resto, valor_consulta: !!a.valor_consulta, valor_ajuste: Number(a.valor_ajuste || 0), valor_produtos: Number(a.valor_produtos || 0), total_pago: totalPago, saldo_devedor: Math.max(0, Number(a.valor_total || 0) - totalPago), pagamentos, estornos, remarcacoes, cliente: { ...cli }, servicos, produtos };
+  return { ...resto, valor_consulta: !!a.valor_consulta, valor_ajuste: Number(a.valor_ajuste || 0), valor_produtos: Number(a.valor_produtos || 0), total_pago: totalPago, saldo_devedor: Math.max(0, Number(a.valor_total || 0) - totalPago), pagamentos, estornos, remarcacoes, profissional: prof ? { ...prof } : null, cliente: { ...cli }, servicos, produtos };
 }
 const centavos = (v) => Math.round(Number(v || 0) * 100) / 100;
 function isoMais(iso, dias) {
@@ -338,8 +457,9 @@ function resumoCaixa() {
       COALESCE(SUM(valor_total), 0) AS total,
       COALESCE(SUM((SELECT SUM(r.valor) FROM recebimentos_agendamento r WHERE r.agendamento_id = agendamentos.id)), 0) AS pago
     FROM agendamentos WHERE status = 'confirmado' AND data BETWEEN ? AND ?`);
+  // só o que entrou na barbearia: o que o barbeiro de aluguel recebeu direto fica com ele
   const porForma = db.prepare(`SELECT forma, SUM(valor) AS total FROM recebimentos_agendamento
-    WHERE date(recebido_em) BETWEEN ? AND ? GROUP BY forma`);
+    WHERE recebido_por = 'barbearia' AND date(recebido_em) BETWEEN ? AND ? GROUP BY forma`);
   const somaAvulsas = db.prepare(`SELECT COUNT(*) AS vendas, COALESCE(SUM(valor_total), 0) AS total
     FROM vendas_avulsas WHERE status = 'ativa' AND data BETWEEN ? AND ?`);
   const porFormaAvulsas = db.prepare(`SELECT forma, SUM(valor_total) AS total FROM vendas_avulsas
@@ -348,6 +468,11 @@ function resumoCaixa() {
     WHERE date(criado_em) BETWEEN ? AND ? GROUP BY forma`);
   const somaDespesas = db.prepare(`SELECT COALESCE(SUM(valor), 0) AS total FROM movimentos_caixa
     WHERE tipo = 'despesa' AND data BETWEEN ? AND ?`);
+  // pagamentos a barbeiros (vales e repasses) e acertos que eles pagaram (aluguel, produtos)
+  const somaRepasses = db.prepare(`SELECT COALESCE(SUM(valor), 0) AS total FROM movimentos_caixa
+    WHERE tipo IN ('vale','repasse') AND data BETWEEN ? AND ?`);
+  const somaAcertos = db.prepare(`SELECT COALESCE(SUM(valor), 0) AS total FROM movimentos_caixa
+    WHERE tipo = 'acerto' AND data BETWEEN ? AND ?`);
   const ranking = db.prepare(`
     SELECT s.nome, COUNT(*) AS quantidade, COALESCE(SUM(s.preco), 0) AS valor
     FROM agendamento_servicos s JOIN agendamentos a ON a.id = s.agendamento_id
@@ -368,6 +493,8 @@ function resumoCaixa() {
     const total = centavos(Number(p.total) + Number(av.total));
     const recebido = centavos(Object.values(formas).reduce((s, v) => s + v, 0));
     const despesas = centavos(somaDespesas.get(de, ate).total);
+    const repasses = centavos(somaRepasses.get(de, ate).total);
+    const acertos = centavos(somaAcertos.get(de, ate).total);
     out[k] = {
       de, ate,
       agendamentos: Number(p.agendamentos || 0),
@@ -382,8 +509,8 @@ function resumoCaixa() {
       ticket_medio: p.agendamentos ? centavos(p.total / p.agendamentos) : 0,
       recebido,
       devolvido: centavos(devolvido),
-      despesas,
-      saldo: centavos(recebido - despesas),
+      despesas, repasses, acertos,
+      saldo: centavos(recebido + acertos - despesas - repasses),
       por_forma: formas,
       servicos_mais_vendidos: ranking.all(de, ate).map((s) => ({ nome: s.nome, quantidade: Number(s.quantidade), valor: centavos(s.valor) })),
     };
@@ -393,7 +520,7 @@ function resumoCaixa() {
 /** Dinheiro que entrou na gaveta no dia: pagamentos de comandas + vendas avulsas. */
 function dinheiroDoDia(data) {
   const comandas = Number(db.prepare(`SELECT COALESCE(SUM(valor), 0) AS total
-    FROM recebimentos_agendamento WHERE forma = 'dinheiro' AND date(recebido_em) = ?`).get(data).total || 0);
+    FROM recebimentos_agendamento WHERE forma = 'dinheiro' AND recebido_por = 'barbearia' AND date(recebido_em) = ?`).get(data).total || 0);
   const avulsas = Number(db.prepare(`SELECT COALESCE(SUM(valor_total), 0) AS total
     FROM vendas_avulsas WHERE forma = 'dinheiro' AND status = 'ativa' AND data = ?`).get(data).total || 0);
   return centavos(comandas + avulsas);
@@ -403,6 +530,43 @@ function devolvidoDoDia(data) {
   return centavos(db.prepare(`SELECT COALESCE(SUM(valor), 0) AS total
     FROM estornos WHERE forma = 'dinheiro' AND date(criado_em) = ?`).get(data).total || 0);
 }
+/**
+ * Lança no caixa de hoje (dentro de uma transação já aberta). Em dinheiro: exige o caixa aberto e,
+ * se for saída, que a gaveta tenha o valor. Vale, repasse e acerto precisam de barbeiro.
+ */
+function lancarMovimento({ tipo, valor, forma, descricao, profissional_id: profissionalId, fechamento_id: fechamentoId = null }) {
+  const v = centavos(valor);
+  // sangria e reforço são sempre dinheiro da gaveta; os outros podem ser em qualquer forma
+  const f = tipo === 'sangria' || tipo === 'reforco' ? 'dinheiro' : String(forma || 'dinheiro');
+  const desc = String(descricao || '').trim().slice(0, 120);
+  const comBarbeiro = ['vale', 'repasse', 'acerto'].includes(tipo);
+  if (!FORMAS_PAGAMENTO.includes(f) || !Number.isFinite(v) || v <= 0 || v > 1e9) throw new Erro(400, 'DADOS_INVALIDOS', 'Informe um valor válido e a forma de pagamento.');
+  if (tipo === 'despesa' && !desc) throw new Erro(400, 'DESCRICAO_OBRIGATORIA', 'Diga com o que foi a despesa.');
+  const prof = comBarbeiro ? db.prepare('SELECT id FROM profissionais WHERE id = ?').get(Number(profissionalId)) : null;
+  if (comBarbeiro && !prof) throw new Erro(400, 'PROFISSIONAL_INVALIDO', 'Escolha o barbeiro.');
+  const data = agoraSP().data;
+  if (f === 'dinheiro') {
+    const caixa = db.prepare('SELECT * FROM caixas_diarios WHERE data = ?').get(data);
+    if (!caixa) throw new Erro(409, 'CAIXA_NAO_ABERTO', 'Abra o caixa de hoje antes de mexer no dinheiro da gaveta.');
+    if (caixa.status === 'fechado') throw new Erro(409, 'CAIXA_JA_FECHADO', 'O caixa de hoje já foi fechado.');
+    if (!ENTRADAS_CAIXA.includes(tipo)) {
+      const disponivel = contaGaveta(data, Number(caixa.valor_abertura)).valor_esperado;
+      if (v > disponivel) throw new Erro(400, 'SALDO_GAVETA_INSUFICIENTE', `Na gaveta deveria haver só ${disponivel.toFixed(2).replace('.', ',')}.`);
+    }
+  }
+  return Number(db.prepare('INSERT INTO movimentos_caixa (data, tipo, valor, forma, descricao, profissional_id, fechamento_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(data, tipo, v, f, desc, prof ? prof.id : null, fechamentoId).lastInsertRowid);
+}
+/** Contrato do barbeiro que vale numa data. Sem contrato: comissão de 0% (tudo fica com a barbearia). */
+function contratoEm(profissionalId, data) {
+  const c = db.prepare('SELECT * FROM profissional_contratos WHERE profissional_id = ? AND vigente_desde <= ? ORDER BY vigente_desde DESC LIMIT 1').get(profissionalId, data);
+  return c ? { ...c } : { tipo: 'comissao', recebimento: 'caixa' };
+}
+/** Quem fica com o pagamento do cliente: o barbeiro de aluguel que recebe direto, ou a barbearia. */
+function recebidoPor(profissionalId) {
+  const c = contratoEm(profissionalId, agoraSP().data);
+  return c.tipo === 'aluguel' && c.recebimento === 'barbeiro' ? 'profissional' : 'barbearia';
+}
 /** Dinheiro não entra numa gaveta já conferida: com o caixa de hoje fechado, só pix/cartão/outro. */
 function exigirCaixaNaoFechado() {
   const caixa = db.prepare('SELECT status FROM caixas_diarios WHERE data = ?').get(agoraSP().data);
@@ -410,25 +574,32 @@ function exigirCaixaNaoFechado() {
     throw new Erro(409, 'CAIXA_FECHADO_DINHEIRO', 'O caixa de hoje já foi fechado. Registre em pix, cartão ou outro, ou receba o dinheiro amanhã.');
   }
 }
-/** Sangrias, despesas e reforços lançados no caixa do dia. */
+/** Lançamentos do caixa do dia: sangria, despesa, reforço, vale, repasse e acerto (os três últimos ligados a um barbeiro). */
 function movimentosCaixa(data) {
-  return db.prepare('SELECT id, tipo, valor, forma, descricao, criado_em FROM movimentos_caixa WHERE data = ? ORDER BY id').all(data)
+  return db.prepare(`SELECT m.id, m.tipo, m.valor, m.forma, m.descricao, m.criado_em, m.profissional_id, m.fechamento_id, p.nome AS profissional_nome
+    FROM movimentos_caixa m LEFT JOIN profissionais p ON p.id = m.profissional_id WHERE m.data = ? ORDER BY m.id`).all(data)
     .map((mv) => ({ ...mv, valor: Number(mv.valor) }));
 }
-/** Conta da gaveta: troco + entradas em dinheiro + reforços − devoluções − sangrias − despesas em dinheiro. */
+/**
+ * Conta da gaveta: troco + entradas em dinheiro + reforços + acertos − devoluções − sangrias − despesas − vales − repasses.
+ * (só o que foi em dinheiro mexe na gaveta)
+ */
 function contaGaveta(data, abertura) {
   const movs = movimentosCaixa(data);
   const soma = (fn) => centavos(movs.filter(fn).reduce((t, mv) => t + mv.valor, 0));
+  const din = (mv) => mv.forma === 'dinheiro';
   const c = {
     recebido_dinheiro: dinheiroDoDia(data),
     devolvido_dinheiro: devolvidoDoDia(data),
     sangrias: soma((mv) => mv.tipo === 'sangria'),
-    despesas_dinheiro: soma((mv) => mv.tipo === 'despesa' && mv.forma === 'dinheiro'),
+    despesas_dinheiro: soma((mv) => mv.tipo === 'despesa' && din(mv)),
     reforcos: soma((mv) => mv.tipo === 'reforco'),
+    repasses_dinheiro: soma((mv) => (mv.tipo === 'vale' || mv.tipo === 'repasse') && din(mv)),
+    acertos_dinheiro: soma((mv) => mv.tipo === 'acerto' && din(mv)),
     movimentos: movs,
   };
-  c.saidas_dinheiro = centavos(c.devolvido_dinheiro + c.sangrias + c.despesas_dinheiro);
-  c.valor_esperado = abertura == null ? null : centavos(abertura + c.recebido_dinheiro + c.reforcos - c.saidas_dinheiro);
+  c.saidas_dinheiro = centavos(c.devolvido_dinheiro + c.sangrias + c.despesas_dinheiro + c.repasses_dinheiro);
+  c.valor_esperado = abertura == null ? null : centavos(abertura + c.recebido_dinheiro + c.reforcos + c.acertos_dinheiro - c.saidas_dinheiro);
   return c;
 }
 function resumoCaixaDiario(data) {
@@ -463,12 +634,18 @@ function listarVendasAvulsas(data) {
  * Extrato para o contador: todo dinheiro que entrou ou saiu no período, pela data do movimento.
  * valor > 0 é entrada, valor < 0 é saída. quando = 'YYYY-MM-DD HH:MM' (horário de São Paulo).
  */
+const TIPOS_EXTRATO = {
+  despesa: 'Despesa', sangria: 'Sangria (retirada da gaveta)', reforco: 'Reforço de troco',
+  vale: 'Vale para barbeiro', repasse: 'Repasse a barbeiro', acerto: 'Acerto pago por barbeiro',
+};
+/** Lançamentos de caixa que são entrada de dinheiro (os outros são saída). */
+const ENTRADAS_CAIXA = ['reforco', 'acerto'];
 function extrato(de, ate) {
   const hm = (s) => String(s || '').slice(0, 16);
   const linhas = [
     ...db.prepare(`SELECT r.recebido_em AS quando, r.valor, r.forma, a.codigo, c.nome FROM recebimentos_agendamento r
       JOIN agendamentos a ON a.id = r.agendamento_id JOIN clientes c ON c.id = a.cliente_id
-      WHERE date(r.recebido_em) BETWEEN ? AND ?`).all(de, ate)
+      WHERE r.recebido_por = 'barbearia' AND date(r.recebido_em) BETWEEN ? AND ?`).all(de, ate)
       .map((r) => ({ quando: hm(r.quando), tipo: 'Pagamento de atendimento', descricao: `${padronizarNome(r.nome)} · ${r.codigo}`, forma: r.forma, valor: centavos(r.valor) })),
     ...db.prepare(`SELECT v.id, v.criado_em AS quando, v.valor_total, v.forma, v.cliente_nome,
         (SELECT GROUP_CONCAT(CASE WHEN i.quantidade > 1 THEN i.quantidade || '× ' ELSE '' END || i.nome, ', ') FROM vendas_avulsas_itens i WHERE i.venda_id = v.id) AS itens
@@ -478,8 +655,13 @@ function extrato(de, ate) {
       JOIN agendamentos a ON a.id = e.agendamento_id JOIN clientes c ON c.id = a.cliente_id
       WHERE date(e.criado_em) BETWEEN ? AND ?`).all(de, ate)
       .map((e) => ({ quando: hm(e.quando), tipo: 'Devolução ao cliente', descricao: `${padronizarNome(e.nome)} · ${e.codigo} ${e.status === 'falta' ? 'com falta' : 'cancelado'}`, forma: e.forma, valor: -centavos(e.valor) })),
-    ...db.prepare('SELECT criado_em AS quando, tipo, valor, forma, descricao FROM movimentos_caixa WHERE data BETWEEN ? AND ?').all(de, ate)
-      .map((mv) => ({ quando: hm(mv.quando), tipo: { despesa: 'Despesa', sangria: 'Sangria (retirada da gaveta)', reforco: 'Reforço de troco' }[mv.tipo], descricao: mv.descricao, forma: mv.forma, valor: mv.tipo === 'reforco' ? centavos(mv.valor) : -centavos(mv.valor) })),
+    ...db.prepare(`SELECT m.criado_em AS quando, m.tipo, m.valor, m.forma, m.descricao, p.nome AS profissional
+      FROM movimentos_caixa m LEFT JOIN profissionais p ON p.id = m.profissional_id WHERE m.data BETWEEN ? AND ?`).all(de, ate)
+      .map((mv) => ({
+        quando: hm(mv.quando), tipo: TIPOS_EXTRATO[mv.tipo],
+        descricao: [mv.profissional, mv.descricao].filter(Boolean).join(' · '), forma: mv.forma,
+        valor: ENTRADAS_CAIXA.includes(mv.tipo) ? centavos(mv.valor) : -centavos(mv.valor),
+      })),
   ];
   return linhas.sort((a, b) => a.quando.localeCompare(b.quando));
 }
@@ -571,11 +753,13 @@ function criarAgendamento(b) {
     const preco = A.calcPricing(ids, servicos, getCombos(true));
 
     const config = getConfig();
+    const prof = resolverProfissional(b.profissional_id);
+    if (!prof) { db.exec('ROLLBACK'); return { ok: false, erro: 'PROFISSIONAL_INVALIDO' }; }
     const r = A.validarHorario({
       data, inicio_min: b.inicio_min, duracao: preco.duracao,
-      horarios: todos('SELECT * FROM horarios_funcionamento'), config,
-      bloqueios: todos('SELECT * FROM bloqueios WHERE data = ?', data),
-      ocupados: db.prepare("SELECT inicio_min ini, fim_min fim FROM agendamentos WHERE data = ? AND status = 'confirmado'").all(data).map((o) => ({ ...o })),
+      horarios: horariosDe(prof.id), config,
+      bloqueios: bloqueiosDe(data, prof.id),
+      ocupados: ocupadosDe(data, prof.id),
       agora: agoraSP(),
     });
     if (!r.ok) { db.exec('ROLLBACK'); return { ok: false, erro: r.motivo }; }
@@ -585,10 +769,10 @@ function criarAgendamento(b) {
     else cli = { id: db.prepare('INSERT INTO clientes (nome, whatsapp) VALUES (?, ?)').run(nome, wa).lastInsertRowid };
 
     const codigo = 'BJ-' + crypto.randomBytes(3).toString('hex').toUpperCase();
-    const ag = db.prepare(`INSERT INTO agendamentos (codigo, cliente_id, data, inicio_min, fim_min, duracao_min, valor_total, combos_aplicados, valor_consulta)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    const ag = db.prepare(`INSERT INTO agendamentos (codigo, cliente_id, data, inicio_min, fim_min, duracao_min, valor_total, combos_aplicados, valor_consulta, profissional_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(codigo, cli.id, data, b.inicio_min, b.inicio_min + preco.duracao, preco.duracao, preco.total,
-        preco.linhas.filter((l) => l.tipo === 'combo').map((l) => l.nome).join(', '), preco.consulta ? 1 : 0);
+        preco.linhas.filter((l) => l.tipo === 'combo').map((l) => l.nome).join(', '), preco.consulta ? 1 : 0, prof.id);
     const isv = db.prepare('INSERT INTO agendamento_servicos (agendamento_id, servico_id, nome, duracao_min, preco) VALUES (?, ?, ?, ?, ?)');
     selecionados.forEach((s) => isv.run(ag.lastInsertRowid, s.id, s.nome, s.duracao_min, s.preco));
     const [ano, mes, dia] = data.split('-');
@@ -624,11 +808,13 @@ function criarAgendamentoAdmin(b) {
     const selecionados = servicos.filter((s) => ids.includes(s.id));
     if (selecionados.length !== ids.length) { db.exec('ROLLBACK'); return { ok: false, erro: 'SERVICO_INVALIDO' }; }
     const preco = A.calcPricing(ids, servicos, getCombos(true));
+    const prof = resolverProfissional(b.profissional_id);
+    if (!prof) { db.exec('ROLLBACK'); return { ok: false, erro: 'PROFISSIONAL_INVALIDO' }; }
     const validacao = A.validarHorario({
       data, inicio_min: inicioMin, duracao: preco.duracao,
-      horarios: todos('SELECT * FROM horarios_funcionamento'), config: getConfig(),
-      bloqueios: todos('SELECT * FROM bloqueios WHERE data = ?', data),
-      ocupados: db.prepare("SELECT inicio_min ini, fim_min fim FROM agendamentos WHERE data = ? AND status = 'confirmado'").all(data).map((o) => ({ ...o })),
+      horarios: horariosDe(prof.id), config: getConfig(),
+      bloqueios: bloqueiosDe(data, prof.id),
+      ocupados: ocupadosDe(data, prof.id),
     });
     if (!validacao.ok) { db.exec('ROLLBACK'); return { ok: false, erro: validacao.motivo }; }
 
@@ -642,10 +828,10 @@ function criarAgendamentoAdmin(b) {
 
     const codigo = 'BJ-' + crypto.randomBytes(3).toString('hex').toUpperCase();
     const ag = db.prepare(`INSERT INTO agendamentos
-      (codigo, cliente_id, data, inicio_min, fim_min, duracao_min, valor_total, valor_ajuste, valor_produtos, combos_aplicados, valor_consulta)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`)
+      (codigo, cliente_id, data, inicio_min, fim_min, duracao_min, valor_total, valor_ajuste, valor_produtos, combos_aplicados, valor_consulta, profissional_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`)
       .run(codigo, clienteId, data, inicioMin, inicioMin + preco.duracao, preco.duracao, Number(preco.total),
-        preco.linhas.filter((l) => l.tipo === 'combo').map((l) => l.nome).join(', '), preco.consulta ? 1 : 0);
+        preco.linhas.filter((l) => l.tipo === 'combo').map((l) => l.nome).join(', '), preco.consulta ? 1 : 0, prof.id);
     const insServico = db.prepare('INSERT INTO agendamento_servicos (agendamento_id, servico_id, nome, duracao_min, preco) VALUES (?, ?, ?, ?, ?)');
     selecionados.forEach((s) => insServico.run(ag.lastInsertRowid, s.id, s.nome, s.duracao_min, s.preco));
     db.exec('COMMIT');
@@ -667,21 +853,24 @@ function reagendarAgendamento(b) {
     const ag = db.prepare('SELECT * FROM agendamentos WHERE id = ?').get(id);
     if (!ag) { db.exec('ROLLBACK'); return { ok: false, erro: 'AGENDAMENTO_NAO_ENCONTRADO' }; }
     if (ag.status !== 'confirmado') { db.exec('ROLLBACK'); return { ok: false, erro: 'AGENDAMENTO_CANCELADO' }; }
-    if (ag.data === data && ag.inicio_min === inicioMin) { db.exec('ROLLBACK'); return { ok: false, erro: 'MESMO_HORARIO' }; }
+    // sem barbeiro informado, continua com o mesmo
+    const prof = resolverProfissional(b.profissional_id == null || b.profissional_id === '' ? ag.profissional_id : b.profissional_id);
+    if (!prof) { db.exec('ROLLBACK'); return { ok: false, erro: 'PROFISSIONAL_INVALIDO' }; }
+    if (ag.data === data && ag.inicio_min === inicioMin && ag.profissional_id === prof.id) { db.exec('ROLLBACK'); return { ok: false, erro: 'MESMO_HORARIO' }; }
     const validacao = A.validarHorario({
       data, inicio_min: inicioMin, duracao: ag.duracao_min,
-      horarios: todos('SELECT * FROM horarios_funcionamento'), config: getConfig(),
-      bloqueios: todos('SELECT * FROM bloqueios WHERE data = ?', data),
+      horarios: horariosDe(prof.id), config: getConfig(),
+      bloqueios: bloqueiosDe(data, prof.id),
       // o próprio horário atual não conta como ocupado
-      ocupados: db.prepare("SELECT inicio_min ini, fim_min fim FROM agendamentos WHERE data = ? AND status = 'confirmado' AND id <> ?").all(data, id).map((o) => ({ ...o })),
+      ocupados: ocupadosDe(data, prof.id, id),
     });
     if (!validacao.ok) { db.exec('ROLLBACK'); return { ok: false, erro: validacao.motivo }; }
     db.prepare('INSERT INTO remarcacoes (agendamento_id, data_anterior, inicio_anterior, data_nova, inicio_novo) VALUES (?, ?, ?, ?, ?)')
       .run(id, ag.data, ag.inicio_min, data, inicioMin);
     // o lembrete enviado era do horário antigo: volta a "não enviado"
-    db.prepare(`UPDATE agendamentos SET data = ?, inicio_min = ?, fim_min = ?,
+    db.prepare(`UPDATE agendamentos SET data = ?, inicio_min = ?, fim_min = ?, profissional_id = ?,
       lembrete_enviado_em = NULL, lembrete_envios = 0, lembrete_aberto_em = NULL, lembrete_aberturas = 0 WHERE id = ?`)
-      .run(data, inicioMin, inicioMin + Number(ag.duracao_min), id);
+      .run(data, inicioMin, inicioMin + Number(ag.duracao_min), prof.id, id);
     db.exec('COMMIT');
     return { ok: true, agendamento: formatarAgendamento(db.prepare('SELECT * FROM agendamentos WHERE id = ?').get(id)) };
   } catch (e) {
@@ -696,7 +885,8 @@ const TABELAS = {
   produtos: { cols: ['nome', 'descricao', 'preco', 'estoque', 'estoque_minimo', 'ativo'], pk: 'id' },
   combos: { cols: ['nome', 'descricao', 'preco', 'duracao_min', 'foto', 'ordem', 'ativo'], pk: 'id' },
   horarios_funcionamento: { cols: ['ativo', 'inicio_min', 'fim_min'], pk: 'dia_semana' },
-  bloqueios: { cols: ['data', 'inicio_min', 'fim_min', 'motivo'], pk: 'id' },
+  bloqueios: { cols: ['data', 'inicio_min', 'fim_min', 'motivo', 'profissional_id'], pk: 'id' },
+  profissionais: { cols: ['nome', 'foto', 'ativo', 'ordem', 'comissao_servicos', 'comissao_produtos'], pk: 'id' },
   galeria: { cols: ['foto', 'legenda', 'ordem', 'ativo'], pk: 'id' },
 };
 function limparLinha(tabela, r) {
@@ -707,6 +897,8 @@ function limparLinha(tabela, r) {
     if (c === 'ativo') v = v ? 1 : 0;
     else if (['duracao_min', 'inicio_min', 'fim_min', 'ordem', 'estoque', 'estoque_minimo'].includes(c)) v = v === null || v === '' ? null : Math.round(Number(v));
     else if (c === 'preco') v = v === null || v === '' ? null : Number(v);
+    else if (c === 'profissional_id') v = v === null || v === '' ? null : Math.round(Number(v));
+    else if (c === 'comissao_servicos' || c === 'comissao_produtos') v = v === null || v === '' ? 0 : Math.round(Number(v) * 100) / 100;
     else v = v == null ? '' : String(v);
     if (typeof v === 'number' && Number.isNaN(v)) throw new Erro(400, 'DADOS_INVALIDOS', 'Valor numérico inválido em ' + c);
     out[c] = v;
@@ -737,6 +929,19 @@ function salvar(tabela, r) {
       if (/CHECK constraint|NOT NULL constraint/.test(e.message)) throw new Erro(400, 'DADOS_INVALIDOS', 'Valores fora do permitido.');
       throw e;
     }
+  }
+  if (tabela === 'profissionais') {
+    if ('nome' in d && !String(d.nome).trim()) throw new Erro(400, 'DADOS_INVALIDOS', 'Informe o nome do barbeiro.');
+    if ('nome' in d) d.nome = padronizarNome(d.nome);
+    if (r.id && d.ativo === 0) {
+      const outros = db.prepare('SELECT COUNT(*) n FROM profissionais WHERE ativo = 1 AND id <> ?').get(r.id).n;
+      if (!outros) throw new Erro(409, 'ULTIMO_PROFISSIONAL', 'É preciso ter pelo menos um barbeiro ativo.');
+      const futuros = db.prepare("SELECT COUNT(*) n FROM agendamentos WHERE profissional_id = ? AND status = 'confirmado' AND data >= ?").get(r.id, agoraSP().data).n;
+      if (futuros) throw new Erro(409, 'PROFISSIONAL_COM_AGENDA', `Este barbeiro tem ${futuros} horário(s) marcado(s). Reagende para outro barbeiro antes de desativar.`);
+    }
+  }
+  if (tabela === 'bloqueios' && d.profissional_id != null && !db.prepare('SELECT 1 FROM profissionais WHERE id = ?').get(d.profissional_id)) {
+    throw new Erro(400, 'PROFISSIONAL_INVALIDO', 'Barbeiro não encontrado.');
   }
   if (tabela === 'horarios_funcionamento') {
     const dia = Number(r.dia_semana);
@@ -785,7 +990,7 @@ async function api(req, res, url) {
   if (m === 'GET' && rota === 'indisponiveis') {
     const d = url.searchParams.get('data') || '';
     if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) throw new Erro(400, 'DATA');
-    return json(res, 200, indisponiveis(d));
+    return json(res, 200, indisponiveis(d, url.searchParams.get('profissional_id')));
   }
   if (m === 'POST' && rota === 'agendar') {
     const r = criarAgendamento(await lerCorpo(req));
@@ -863,6 +1068,33 @@ async function api(req, res, url) {
       const resultado = criarAgendamentoAdmin(await lerCorpo(req));
       return json(res, resultado.ok ? 200 : 409, resultado);
     }
+    // horário próprio do barbeiro: 7 dias, ou vazio/null para voltar a seguir o da barbearia
+    if (m === 'POST' && rota === 'admin/profissional-horarios') {
+      const b = await lerCorpo(req);
+      const id = Number(b.profissional_id);
+      if (!Number.isInteger(id) || !db.prepare('SELECT 1 FROM profissionais WHERE id = ?').get(id)) throw new Erro(404, 'PROFISSIONAL_INVALIDO', 'Barbeiro não encontrado.');
+      const linhas = Array.isArray(b.horarios) ? b.horarios : [];
+      if (linhas.length && (linhas.length !== 7 || new Set(linhas.map((h) => Number(h.dia_semana))).size !== 7
+          || linhas.some((h) => !(Number(h.dia_semana) >= 0 && Number(h.dia_semana) <= 6) || !Number.isInteger(Number(h.inicio_min)) || !Number.isInteger(Number(h.fim_min))
+            || Number(h.inicio_min) < 0 || Number(h.fim_min) > 1440 || (h.ativo && Number(h.fim_min) <= Number(h.inicio_min))))) {
+        throw new Erro(400, 'DADOS_INVALIDOS', 'Confira os horários de cada dia.');
+      }
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        db.prepare('DELETE FROM profissional_horarios WHERE profissional_id = ?').run(id);
+        const ins = db.prepare('INSERT INTO profissional_horarios (profissional_id, dia_semana, ativo, inicio_min, fim_min) VALUES (?, ?, ?, ?, ?)');
+        for (const h of linhas) {
+          // dia de folga guarda um intervalo padrão só para cumprir a regra da tabela
+          const [ini, fim] = h.ativo ? [Number(h.inicio_min), Number(h.fim_min)] : [480, 1080];
+          ins.run(id, Number(h.dia_semana), h.ativo ? 1 : 0, ini, fim);
+        }
+        db.exec('COMMIT');
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
+        throw e;
+      }
+      return json(res, 200, { ok: true, horarios: horariosDe(id) });
+    }
     if (m === 'POST' && rota === 'admin/reagendar') {
       const resultado = reagendarAgendamento(await lerCorpo(req));
       return json(res, resultado.ok ? 200 : 409, resultado);
@@ -914,30 +1146,13 @@ async function api(req, res, url) {
     if (m === 'POST' && rota === 'admin/caixa-movimento') {
       const b = await lerCorpo(req);
       const tipo = String(b.tipo || '');
-      const valor = centavos(b.valor);
-      // sangria e reforço são sempre dinheiro da gaveta; despesa pode ter sido paga de outra forma
-      const forma = tipo === 'despesa' ? String(b.forma || 'dinheiro') : 'dinheiro';
-      const descricao = String(b.descricao || '').trim().slice(0, 120);
-      if (!['sangria', 'despesa', 'reforco'].includes(tipo) || !FORMAS_PAGAMENTO.includes(forma)
-          || !Number.isFinite(valor) || valor <= 0 || valor > 1e9) {
-        throw new Erro(400, 'DADOS_INVALIDOS', 'Informe o tipo, um valor válido e a forma de pagamento.');
-      }
-      if (tipo === 'despesa' && !descricao) throw new Erro(400, 'DESCRICAO_OBRIGATORIA', 'Diga com o que foi a despesa.');
-      const data = agoraSP().data;
+      // repasse e acerto só nascem do fechamento de um barbeiro
+      if (!['sangria', 'despesa', 'reforco', 'vale'].includes(tipo)) throw new Erro(400, 'DADOS_INVALIDOS', 'Tipo de lançamento inválido.');
       db.exec('BEGIN IMMEDIATE');
       try {
-        const caixa = db.prepare('SELECT * FROM caixas_diarios WHERE data = ?').get(data);
-        if (forma === 'dinheiro') {
-          if (!caixa) throw new Erro(409, 'CAIXA_NAO_ABERTO', 'Abra o caixa de hoje antes de mexer no dinheiro da gaveta.');
-          if (caixa.status === 'fechado') throw new Erro(409, 'CAIXA_JA_FECHADO', 'O caixa de hoje já foi fechado.');
-          if (tipo !== 'reforco') {
-            const disponivel = contaGaveta(data, Number(caixa.valor_abertura)).valor_esperado;
-            if (valor > disponivel) throw new Erro(400, 'SALDO_GAVETA_INSUFICIENTE', `Na gaveta deveria haver só ${disponivel.toFixed(2).replace('.', ',')}.`);
-          }
-        }
-        db.prepare('INSERT INTO movimentos_caixa (data, tipo, valor, forma, descricao) VALUES (?, ?, ?, ?, ?)').run(data, tipo, valor, forma, descricao);
+        lancarMovimento({ tipo, valor: b.valor, forma: b.forma, descricao: b.descricao, profissional_id: b.profissional_id });
         db.exec('COMMIT');
-        return json(res, 200, resumoCaixaDiario(data));
+        return json(res, 200, resumoCaixaDiario(agoraSP().data));
       } catch (e) {
         try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
         throw e;
@@ -950,6 +1165,7 @@ async function api(req, res, url) {
       try {
         const mv = db.prepare('SELECT * FROM movimentos_caixa WHERE id = ?').get(id);
         if (!mv) throw new Erro(404, 'MOVIMENTO_NAO_ENCONTRADO', 'Lançamento não encontrado.');
+        if (mv.fechamento_id) throw new Erro(409, 'MOVIMENTO_FECHADO', 'Este lançamento faz parte do fechamento de um barbeiro. Desfaça o fechamento para alterá-lo.');
         const caixa = db.prepare('SELECT status FROM caixas_diarios WHERE data = ?').get(mv.data);
         if (caixa && caixa.status === 'fechado') throw new Erro(409, 'CAIXA_JA_FECHADO', 'O caixa desse dia já foi fechado; o lançamento não pode mais ser excluído.');
         db.prepare('DELETE FROM movimentos_caixa WHERE id = ?').run(id);
@@ -1040,6 +1256,98 @@ async function api(req, res, url) {
       if (!Number.isInteger(id) || id < 1) throw new Erro(400, 'DADOS_INVALIDOS');
       return json(res, 200, db.prepare('SELECT * FROM agendamentos WHERE cliente_id = ? ORDER BY data DESC, inicio_min DESC LIMIT 30').all(id).map((a) => formatarAgendamento({ ...a })));
     }
+    /* ------------------------------------------------- comissões e repasses */
+    // contrato novo (ou corrige o do mesmo dia): vale a partir de vigente_desde, o passado continua com o anterior
+    if (m === 'POST' && rota === 'admin/profissional-contrato') {
+      const b = await lerCorpo(req);
+      const id = Number(b.profissional_id);
+      const desde = String(b.vigente_desde || agoraSP().data);
+      const tipo = String(b.tipo || '');
+      const num = (v, max) => { const n = centavos(v); return Number.isFinite(n) && n >= 0 && n <= max ? n : NaN; };
+      const c = {
+        comissao_servicos: num(b.comissao_servicos ?? 0, 100), comissao_produtos: num(b.comissao_produtos ?? 0, 100),
+        valor_fixo: num(b.valor_fixo ?? 0, 1e7), aluguel_valor: num(b.aluguel_valor ?? 0, 1e7),
+        aluguel_periodo: b.aluguel_periodo === 'semana' ? 'semana' : 'mes', recebimento: b.recebimento === 'barbeiro' ? 'barbeiro' : 'caixa',
+      };
+      if (!db.prepare('SELECT 1 FROM profissionais WHERE id = ?').get(id)) throw new Erro(404, 'PROFISSIONAL_INVALIDO', 'Barbeiro não encontrado.');
+      if (!['dono', 'comissao', 'aluguel'].includes(tipo) || !/^\d{4}-\d{2}-\d{2}$/.test(desde) || Object.values(c).some((v) => Number.isNaN(v))) {
+        throw new Erro(400, 'DADOS_INVALIDOS', 'Confira o contrato: porcentagens de 0 a 100 e valores positivos.');
+      }
+      if (tipo === 'aluguel' && !(c.aluguel_valor > 0)) throw new Erro(400, 'DADOS_INVALIDOS', 'Informe o valor do aluguel da cadeira.');
+      db.prepare(`INSERT INTO profissional_contratos (profissional_id, vigente_desde, tipo, comissao_servicos, comissao_produtos, valor_fixo, aluguel_valor, aluguel_periodo, recebimento)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(profissional_id, vigente_desde) DO UPDATE SET tipo = excluded.tipo, comissao_servicos = excluded.comissao_servicos,
+          comissao_produtos = excluded.comissao_produtos, valor_fixo = excluded.valor_fixo, aluguel_valor = excluded.aluguel_valor,
+          aluguel_periodo = excluded.aluguel_periodo, recebimento = excluded.recebimento`)
+        .run(id, desde, tipo, c.comissao_servicos, c.comissao_produtos, c.valor_fixo, c.aluguel_valor, c.aluguel_periodo, c.recebimento);
+      return json(res, 200, todos('SELECT * FROM profissional_contratos WHERE profissional_id = ? ORDER BY vigente_desde', id));
+    }
+    // vales que ainda não entraram em nenhum fechamento
+    if (m === 'GET' && rota === 'admin/vales-pendentes') {
+      return json(res, 200, db.prepare("SELECT id, profissional_id, data, valor, forma, descricao, criado_em FROM movimentos_caixa WHERE tipo = 'vale' AND fechamento_id IS NULL ORDER BY data, id").all().map((v) => ({ ...v, valor: Number(v.valor) })));
+    }
+    if (m === 'GET' && rota === 'admin/fechamentos') {
+      return json(res, 200, db.prepare('SELECT f.*, p.nome AS profissional_nome FROM fechamentos f JOIN profissionais p ON p.id = f.profissional_id ORDER BY f.ate DESC, f.id DESC LIMIT 200').all().map((f) => ({ ...f })));
+    }
+    // fecha o período de um barbeiro: guarda o extrato, dá baixa nos vales e lança no caixa o repasse (ou o acerto que ele paga)
+    if (m === 'POST' && rota === 'admin/fechamento') {
+      const b = await lerCorpo(req);
+      const id = Number(b.profissional_id);
+      const de = String(b.de || ''), ate = String(b.ate || '');
+      const n = (k) => centavos(b[k]);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(de) || !/^\d{4}-\d{2}-\d{2}$/.test(ate) || de > ate || ['servicos', 'produtos', 'parte', 'fixo', 'aluguel', 'recebido_profissional', 'vales', 'total'].some((k) => !Number.isFinite(n(k)))) {
+        throw new Erro(400, 'DADOS_INVALIDOS', 'Confira o período e os valores do fechamento.');
+      }
+      if (!FORMAS_PAGAMENTO.includes(String(b.forma || 'dinheiro'))) throw new Erro(400, 'DADOS_INVALIDOS', 'Forma de pagamento inválida.');
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const prof = db.prepare('SELECT * FROM profissionais WHERE id = ?').get(id);
+        if (!prof) throw new Erro(404, 'PROFISSIONAL_INVALIDO', 'Barbeiro não encontrado.');
+        const choque = db.prepare('SELECT de, ate FROM fechamentos WHERE profissional_id = ? AND de <= ? AND ? <= ate').get(id, ate, de);
+        if (choque) throw new Erro(409, 'PERIODO_JA_FECHADO', `Já existe fechamento de ${prof.nome} entre ${choque.de.split('-').reverse().join('/')} e ${choque.ate.split('-').reverse().join('/')}.`);
+        // os vales precisam ser exatamente os pendentes que o painel somou (evita fechar com conta desatualizada)
+        const ids = (Array.isArray(b.vale_ids) ? b.vale_ids : []).map(Number);
+        const vales = ids.length ? db.prepare(`SELECT id, valor FROM movimentos_caixa WHERE tipo = 'vale' AND fechamento_id IS NULL AND profissional_id = ? AND id IN (${ids.map(() => '?').join(',')})`).all(id, ...ids) : [];
+        if (vales.length !== ids.length || centavos(vales.reduce((t, v) => t + Number(v.valor), 0)) !== n('vales')) {
+          throw new Erro(409, 'DADOS_DESATUALIZADOS', 'Os vales mudaram desde que a tela foi aberta. Atualize e confira de novo.');
+        }
+        const total = n('total');
+        const fid = Number(db.prepare(`INSERT INTO fechamentos (profissional_id, de, ate, atendimentos, servicos, produtos, parte, fixo, aluguel, recebido_profissional, vales, total, forma, observacao)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, de, ate, Math.max(0, Math.round(Number(b.atendimentos) || 0)), n('servicos'), n('produtos'), n('parte'), n('fixo'), n('aluguel'),
+          n('recebido_profissional'), n('vales'), total, String(b.forma || 'dinheiro'), String(b.observacao || '').trim().slice(0, 200)).lastInsertRowid);
+        for (const v of vales) db.prepare('UPDATE movimentos_caixa SET fechamento_id = ? WHERE id = ?').run(fid, v.id);
+        const periodo = `${de.split('-').reverse().join('/')} a ${ate.split('-').reverse().join('/')}`;
+        if (total > 0) lancarMovimento({ tipo: 'repasse', valor: total, forma: b.forma, descricao: `Fechamento ${periodo}`, profissional_id: id, fechamento_id: fid });
+        if (total < 0) lancarMovimento({ tipo: 'acerto', valor: -total, forma: b.forma, descricao: `Fechamento ${periodo}`, profissional_id: id, fechamento_id: fid });
+        db.exec('COMMIT');
+        return json(res, 200, { ok: true, id: fid });
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
+        throw e;
+      }
+    }
+    // desfaz um fechamento (lançado errado): tira o repasse/acerto do caixa e devolve os vales para pendentes
+    if (m === 'POST' && rota === 'admin/fechamento/excluir') {
+      const fid = Number((await lerCorpo(req)).id);
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const f = db.prepare('SELECT * FROM fechamentos WHERE id = ?').get(fid);
+        if (!f) throw new Erro(404, 'FECHAMENTO_NAO_ENCONTRADO', 'Fechamento não encontrado.');
+        const mov = db.prepare("SELECT * FROM movimentos_caixa WHERE fechamento_id = ? AND tipo IN ('repasse','acerto')").get(fid);
+        if (mov && mov.forma === 'dinheiro') {
+          const caixa = db.prepare('SELECT status FROM caixas_diarios WHERE data = ?').get(mov.data);
+          if (caixa && caixa.status === 'fechado') throw new Erro(409, 'CAIXA_JA_FECHADO', 'O dinheiro desse fechamento saiu de um caixa que já foi fechado; não dá para desfazer.');
+        }
+        db.prepare("DELETE FROM movimentos_caixa WHERE fechamento_id = ? AND tipo IN ('repasse','acerto')").run(fid);
+        db.prepare("UPDATE movimentos_caixa SET fechamento_id = NULL WHERE fechamento_id = ? AND tipo = 'vale'").run(fid);
+        db.prepare('DELETE FROM fechamentos WHERE id = ?').run(fid);
+        db.exec('COMMIT');
+        return json(res, 200, { ok: true });
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* transação já encerrada */ }
+        throw e;
+      }
+    }
     if (m === 'GET' && rota === 'admin/extrato') {
       const de = url.searchParams.get('de'), ate = url.searchParams.get('ate');
       if (!/^\d{4}-\d{2}-\d{2}$/.test(de || '') || !/^\d{4}-\d{2}-\d{2}$/.test(ate || '') || de > ate) throw new Erro(400, 'DATA_INVALIDA', 'Escolha um período válido.');
@@ -1109,8 +1417,10 @@ async function api(req, res, url) {
         const pago = Number(db.prepare('SELECT COALESCE(SUM(valor), 0) AS total FROM recebimentos_agendamento WHERE agendamento_id = ?').get(id).total || 0);
         const saldo = Math.round((Number(ag.valor_total) - pago) * 100) / 100;
         if (valor > saldo) throw new Erro(400, 'RECEBIMENTO_EXCEDE_SALDO', 'O recebimento não pode ser maior que o saldo pendente.');
-        if (forma === 'dinheiro') exigirCaixaNaoFechado();
-        db.prepare('INSERT INTO recebimentos_agendamento (agendamento_id, valor, forma) VALUES (?, ?, ?)').run(id, valor, forma);
+        // barbeiro de aluguel que recebe direto: o dinheiro fica com ele, não entra na gaveta
+        const por = recebidoPor(ag.profissional_id);
+        if (forma === 'dinheiro' && por === 'barbearia') exigirCaixaNaoFechado();
+        db.prepare('INSERT INTO recebimentos_agendamento (agendamento_id, valor, forma, recebido_por) VALUES (?, ?, ?, ?)').run(id, valor, forma, por);
         db.exec('COMMIT');
         return json(res, 200, formatarAgendamento(db.prepare('SELECT * FROM agendamentos WHERE id = ?').get(id)));
       } catch (e) {
@@ -1201,7 +1511,8 @@ async function api(req, res, url) {
           db.prepare('UPDATE agendamentos SET status = ? WHERE id = ?').run(falta ? 'falta' : 'cancelado', id);
           // devolução ao cliente: um estorno por forma de pagamento, lançado no caixa de hoje
           if (devolver) {
-            const formas = db.prepare('SELECT forma, SUM(valor) AS total FROM recebimentos_agendamento WHERE agendamento_id = ? GROUP BY forma').all(id);
+            // só devolve o que entrou na barbearia; o que o barbeiro recebeu direto, ele mesmo devolve
+            const formas = db.prepare("SELECT forma, SUM(valor) AS total FROM recebimentos_agendamento WHERE agendamento_id = ? AND recebido_por = 'barbearia' GROUP BY forma").all(id);
             if (formas.some((f) => f.forma === 'dinheiro')) {
               const caixa = db.prepare('SELECT status FROM caixas_diarios WHERE data = ?').get(agoraSP().data);
               if (caixa && caixa.status === 'fechado') throw new Erro(409, 'CAIXA_JA_FECHADO', 'O caixa de hoje já foi fechado; não dá para devolver dinheiro agora. Cancele sem devolver ou devolva por fora.');
@@ -1251,6 +1562,9 @@ async function api(req, res, url) {
       const t = TABELAS[mm[1]];
       if (!t) throw new Erro(404, 'TABELA');
       const b = await lerCorpo(req);
+      if (mm[1] === 'profissionais' && !db.prepare('SELECT 1 FROM profissionais WHERE ativo = 1 AND id <> ?').get(Number(b.id))) {
+        throw new Erro(409, 'ULTIMO_PROFISSIONAL', 'É preciso ter pelo menos um barbeiro ativo.');
+      }
       try {
         db.prepare(`DELETE FROM ${mm[1]} WHERE ${t.pk} = ?`).run(Number(b.id));
       } catch (e) {

@@ -9,7 +9,8 @@
 
   const S = {
     etapa: 1, site: null, ids: new Set(), data: null, mes: null, inicio: null,
-    ocupados: [], carregandoHorarios: false, erroHorarios: false,
+    // prof: barbeiro escolhido (null = sem preferência); ocupadosPor: id do barbeiro -> intervalos ocupados no dia
+    prof: null, ocupadosPor: new Map(), carregandoHorarios: false, erroHorarios: false,
     nome: '', whats: '', erros: {}, enviando: false, resultado: null, alerta: null,
   };
 
@@ -18,6 +19,18 @@
   /* ------------------------------------------------------------ utilidades */
   const agora = () => { const d = new Date(); return { data: A.isoDate(d), min: d.getHours() * 60 + d.getMinutes() }; };
   const preco = () => A.calcPricing([...S.ids], S.site.servicos, S.site.combos);
+
+  /* barbeiros: com um só, nada muda no fluxo (a escolha só aparece com dois ou mais) */
+  const profs = () => S.site.profissionais || [];
+  const varios = () => profs().length > 1;
+  const nomeProf = (id) => (profs().find((p) => p.id === id) || {}).nome || '';
+  /** Expediente do barbeiro: o próprio, se tiver; senão, o da barbearia. */
+  const horDe = (id) => { const p = profs().find((x) => x.id === id); return p && p.horarios && p.horarios.length ? p.horarios : S.site.horarios; };
+  /** Barbeiros que podem atender: o escolhido ou, sem preferência, todos. Sem lista (banco antigo), um "barbeiro" genérico. */
+  const candidatos = () => {
+    const l = S.prof ? profs().filter((p) => p.id === S.prof) : profs();
+    return l.length ? l : [{ id: null }];
+  };
   const totalTxt = (p) => {
     const total = Number(p.total || 0);
     return p.consulta ? (total ? A.fmtBRL(total) + ' + a consultar' : 'A consultar') : A.fmtBRL(total);
@@ -101,14 +114,16 @@
       <button class="btn btn--solid" data-acao="continuar" ${S.ids.size ? '' : 'disabled'}>Continuar</button>`);
   }
 
+  /** Dia disponível se algum barbeiro candidato trabalha nele com tempo para os serviços. */
   function diaLivreNoCalendario(iso, dur) {
     const hoje = agora();
     const cfg = S.site.config;
     if (iso < hoje.data || iso > A.addDays(hoje.data, Number(cfg.dias_agenda || 60))) return false;
-    const j = A.janelaDoDia(iso, S.site.horarios);
-    if (!j || j.fim - j.ini < dur) return false;
-    if (iso === hoje.data && hoje.min + Number(cfg.antecedencia_min || 0) + dur > j.fim) return false;
-    return true;
+    return candidatos().some((p) => {
+      const j = A.janelaDoDia(iso, horDe(p.id));
+      if (!j || j.fim - j.ini < dur) return false;
+      return !(iso === hoje.data && hoje.min + Number(cfg.antecedencia_min || 0) + dur > j.fim);
+    });
   }
 
   function telaData() {
@@ -129,7 +144,11 @@
       const livre = diaLivreNoCalendario(iso, p.duracao);
       cel += `<button type="button" class="dia${iso === hoje.data ? ' hoje' : ''}${iso === S.data ? ' sel' : ''}" data-dia="${iso}" ${livre ? '' : 'disabled'} aria-label="${dataLonga(iso)}${livre ? '' : ', indisponível'}" ${iso === S.data ? 'aria-pressed="true"' : ''}>${d}</button>`;
     }
-    $('#tela').innerHTML = `<h1 tabindex="-1">Escolha a data</h1><p class="sub">Selecione uma data disponível.</p>
+    const escolhaProf = varios() ? `<div class="profs" role="group" aria-label="Barbeiro">
+        <button type="button" class="prof" data-prof="0" aria-pressed="${S.prof === null}"><span class="prof__av">${BJIcons.svg('users')}</span><span>Sem preferência</span></button>
+        ${profs().map((p) => `<button type="button" class="prof" data-prof="${p.id}" aria-pressed="${S.prof === p.id}"><span class="prof__av">${esc(p.nome.trim().charAt(0).toUpperCase())}</span><span>${esc(p.nome)}</span></button>`).join('')}</div>` : '';
+    $('#tela').innerHTML = `<h1 tabindex="-1">${varios() ? 'Com quem e quando?' : 'Escolha a data'}</h1><p class="sub">${varios() ? 'Escolha o barbeiro (ou deixe sem preferência) e uma data disponível.' : 'Selecione uma data disponível.'}</p>
+      ${escolhaProf}
       <div class="cal-nav"><button type="button" data-mes="-1" aria-label="Mês anterior" ${noMesAtual ? 'disabled' : ''}>${BJIcons.svg('left')}</button>
         <strong aria-live="polite">${A.MESES[m]} ${y}</strong>
         <button type="button" data-mes="1" aria-label="Próximo mês" ${proxIso > maxIso ? 'disabled' : ''}>${BJIcons.svg('right')}</button></div>
@@ -138,21 +157,33 @@
     rodape(`<button class="btn btn--solid" data-acao="continuar" ${S.data ? '' : 'disabled'}>Continuar</button>`);
   }
 
+  /** Ocupação do dia de cada barbeiro candidato (sem dado pessoal: só os intervalos). */
   async function carregarHorarios() {
     const dia = S.data;
     S.carregandoHorarios = true; S.erroHorarios = false;
     if (S.etapa === 3) render(false);
-    try { S.ocupados = await Api.indisponiveis(dia); } catch { S.erroHorarios = true; S.ocupados = []; }
+    const lista = candidatos();
+    try {
+      const res = await Promise.all(lista.map((p) => Api.indisponiveis(dia, p.id)));
+      S.ocupadosPor = new Map(lista.map((p, i) => [p.id, res[i]]));
+    } catch { S.erroHorarios = true; S.ocupadosPor = new Map(); }
     if (dia !== S.data) return;
     S.carregandoHorarios = false;
-    if (S.inicio != null) { // horário escolhido antes pode ter sido tomado por outra pessoa
-      const r = A.validarHorario({ ...ctxHorario(), inicio_min: S.inicio });
-      if (!r.ok) S.inicio = null;
-    }
+    // horário escolhido antes pode ter sido tomado por outra pessoa
+    if (S.inicio != null && !livresNoHorario(S.inicio).length) S.inicio = null;
     if (S.etapa === 3) render(false);
   }
-  function ctxHorario() {
-    return { data: S.data, duracao: preco().duracao, horarios: S.site.horarios, config: S.site.config, bloqueios: [], ocupados: S.ocupados, agora: agora() };
+  function ctxHorario(profId) {
+    return { data: S.data, duracao: preco().duracao, horarios: horDe(profId), config: S.site.config, bloqueios: [], ocupados: S.ocupadosPor.get(profId) || [], agora: agora() };
+  }
+  /** Barbeiros livres para começar em `inicio`. */
+  const livresNoHorario = (inicio) => candidatos().filter((p) => A.validarHorario({ ...ctxHorario(p.id), inicio_min: inicio }).ok).map((p) => p.id);
+  /** Sem preferência: entre os livres, quem tem menos tempo ocupado no dia (divide o movimento); empate = ordem da lista. */
+  function barbeiroPara(inicio) {
+    if (S.prof) return S.prof;
+    const livres = livresNoHorario(inicio);
+    const ocupado = (id) => (S.ocupadosPor.get(id) || []).reduce((t, o) => t + (Number(o.fim) - Number(o.ini)), 0);
+    return livres.sort((a, b) => ocupado(a) - ocupado(b))[0] ?? null;
   }
 
   function telaHorario() {
@@ -164,15 +195,25 @@
       corpo = `<div class="vazio-msg">Não foi possível carregar os horários.<br><button class="btn btn--sm" style="margin-top:12px" data-acao="recarregar">Tentar novamente</button></div>`;
     } else {
       // Livres + horários ocupados (almoço, bloqueio ou cliente) aparecem; os que só "não cabem" ficam ocultos.
-      const ocupados = [...(al ? [al] : []), ...S.ocupados.map((o) => ({ ini: Number(o.ini), fim: Number(o.fim) }))];
-      const ocupado = (t) => ocupados.some((o) => o.ini <= t && t < o.fim);
-      const slots = A.gerarHorarios(ctxHorario()).filter((s) => s.livre || (s.motivo !== 'PASSADO' && ocupado(s.inicio_min)));
+      // Com vários barbeiros, um horário está livre se pelo menos um candidato estiver livre nele.
+      const porInicio = new Map();
+      for (const p of candidatos()) {
+        const ocupados = [...(al ? [al] : []), ...(S.ocupadosPor.get(p.id) || []).map((o) => ({ ini: Number(o.ini), fim: Number(o.fim) }))];
+        const ocupado = (t) => ocupados.some((o) => o.ini <= t && t < o.fim);
+        for (const s of A.gerarHorarios(ctxHorario(p.id))) {
+          const atual = porInicio.get(s.inicio_min) || { inicio_min: s.inicio_min, livre: false, mostrar: false };
+          if (s.livre) atual.livre = true;
+          else if (s.motivo !== 'PASSADO' && ocupado(s.inicio_min)) atual.mostrar = true;
+          porInicio.set(s.inicio_min, atual);
+        }
+      }
+      const slots = [...porInicio.values()].filter((s) => s.livre || s.mostrar).sort((a, b) => a.inicio_min - b.inicio_min);
       corpo = slots.some((s) => s.livre)
         ? `<div class="slots" role="group" aria-label="Horários">${slots.map((s) => `<button type="button" class="slot" data-h="${s.inicio_min}" ${s.livre ? '' : `disabled aria-label="${A.fmtMin(s.inicio_min)}, indisponível"`} aria-pressed="${S.inicio === s.inicio_min}">${A.fmtMin(s.inicio_min)}</button>`).join('')}</div>`
         : '<div class="vazio-msg">Não há horários disponíveis nesta data para os serviços escolhidos.<br>Escolha outra data.</div>';
     }
     $('#tela').innerHTML = `<h1 tabindex="-1">Horários disponíveis</h1>
-      <div class="data-linha">${BJIcons.svg('calendar')}<span>${dataLonga(S.data)}</span></div>${corpo}`;
+      <div class="data-linha">${BJIcons.svg('calendar')}<span>${dataLonga(S.data)}${varios() ? ` · ${S.prof ? 'com ' + esc(nomeProf(S.prof)) : 'qualquer barbeiro'}` : ''}</span></div>${corpo}`;
     rodape(`<button class="btn btn--solid" data-acao="continuar" ${S.inicio != null ? '' : 'disabled'}>Continuar</button>`);
   }
 
@@ -197,6 +238,7 @@
       <dl>
         <div class="par"><dt>Data</dt><dd>${esc(dataCurta(o.data))}</dd></div>
         <div class="par"><dt>Horário</dt><dd>${A.fmtMin(o.inicio)}</dd></div>
+        ${o.barbeiro ? `<div class="par"><dt>Barbeiro</dt><dd>${esc(o.barbeiro)}</dd></div>` : ''}
       </dl><div class="sep"></div>
       <dl>
         <div class="par" style="flex-direction:column;gap:2px"><dt>Serviços</dt><dd style="text-align:left">${o.linhas.map((l) => `<div class="item"><span>${esc(l.nome)}</span><span>${l.preco == null ? 'Sob consulta' : A.fmtBRL(l.preco)}</span></div>`).join('')}</dd></div>
@@ -213,7 +255,9 @@
       : { nome: l.nome, preco: l.preco }));
     $('#tela').innerHTML = `<h1 tabindex="-1">Confirme seu agendamento</h1><p class="sub">Confira os dados antes de confirmar.</p>
       ${S.alerta ? `<div class="alerta" role="alert">${BJIcons.svg('close')}<div>${esc(S.alerta)}</div></div>` : ''}
-      ${blocoResumo({ data: S.data, inicio: S.inicio, dur: p.duracao, linhas, total: totalTxt(p), cliente: { nome: BJ.nome(S.nome), whatsapp: S.whats } })}`;
+      ${blocoResumo({ data: S.data, inicio: S.inicio, dur: p.duracao, linhas, total: totalTxt(p), cliente: { nome: BJ.nome(S.nome), whatsapp: S.whats },
+        // sem preferência: já mostra quem vai atender (o primeiro livre que equilibra o dia)
+        barbeiro: varios() ? (nomeProf(barbeiroPara(S.inicio)) || 'Sem preferência') + (S.prof ? '' : ' (disponível)') : '' })}`;
     rodape(`<button class="btn btn--solid" data-acao="confirmar" ${S.enviando ? 'disabled' : ''}>${S.enviando ? '<span class="spinner" aria-hidden="true"></span>Confirmando…' : 'Confirmar agendamento'}</button>`);
   }
 
@@ -235,6 +279,7 @@
           <div class="ticket__data"><span>${esc(semana.charAt(0).toUpperCase() + semana.slice(1))}</span><strong>${esc(dia.toLocaleDateString('pt-BR', { day: 'numeric', month: 'long' }))}</strong></div>
           <div class="ticket__hora"><strong>${A.fmtMin(a.inicio_min)}</strong><span>até ${A.fmtMin(a.fim_min)}</span></div>
         </div>
+        ${varios() && a.profissional ? `<div class="ticket__prof">${BJIcons.svg('user')}<span>Com <b>${esc(a.profissional.nome)}</b></span></div>` : ''}
         <ul class="ticket__itens">${linhas.map((l) => `<li><span>${esc(l.nome)}</span><span>${l.preco == null ? 'Sob consulta' : A.fmtBRL(l.preco)}</span></li>`).join('')}
           <li class="ticket__total"><span>Total</span><span>${esc(tot)}</span></li></ul>
         ${end ? `<a class="ticket__local" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(end)}" target="_blank" rel="noopener">${BJIcons.svg('pin')}<span>${esc(end)}</span>${BJIcons.svg('right')}</a>` : ''}
@@ -252,7 +297,7 @@
     const msg = `Olá! Acabei de agendar pelo site da ${S.site.config.nome || 'Barbearia do Juan'}. Seguem os dados do meu agendamento:
 
 *Data:* ${A.fmtData(a.data)}
-*Horário:* ${A.fmtMin(a.inicio_min)}
+*Horário:* ${A.fmtMin(a.inicio_min)}${varios() && a.profissional ? `\n*Barbeiro:* ${a.profissional.nome}` : ''}
 *Serviços:* ${a.servicos.map((s) => s.nome).join(', ')}
 *Nome:* ${a.cliente.nome}
 
@@ -298,7 +343,12 @@ Até lá!`;
   $('#tela').addEventListener('click', (e) => {
     const b = e.target.closest('button');
     if (!b) return;
-    if (b.dataset.dia) { S.data = b.dataset.dia; S.inicio = null; render(false); const sel = $('.dia.sel'); if (sel) sel.focus(); }
+    if (b.dataset.prof != null) {
+      // trocar de barbeiro muda a disponibilidade: mantém a data só se ela continuar livre
+      S.prof = Number(b.dataset.prof) || null; S.inicio = null;
+      if (S.data && !diaLivreNoCalendario(S.data, preco().duracao)) S.data = null;
+      render(false); const sel = $('.prof[aria-pressed="true"]'); if (sel) sel.focus();
+    } else if (b.dataset.dia) { S.data = b.dataset.dia; S.inicio = null; render(false); const sel = $('.dia.sel'); if (sel) sel.focus(); }
     else if (b.dataset.mes) { const k = Number(b.dataset.mes); const d = new Date(S.mes.y, S.mes.m + k, 1); S.mes = { y: d.getFullYear(), m: d.getMonth() }; render(false); }
     else if (b.dataset.h) { S.inicio = Number(b.dataset.h); render(false); const sel = $('.slot[aria-pressed="true"]'); if (sel) sel.focus(); }
     else if (b.dataset.acao) acao(b.dataset.acao);
@@ -361,6 +411,7 @@ Até lá!`;
         servico_ids: [...S.ids],
         nome: BJ.nome(S.nome),
         whatsapp: S.whats.replace(/\D/g, ''),
+        profissional_id: barbeiroPara(S.inicio),
       });
       S.enviando = false;
       if (r.ok) { $('#toast').hidden = true; S.resultado = r.agendamento; history.replaceState({ etapa: 6 }, ''); S.etapa = 6; render(true); return; }

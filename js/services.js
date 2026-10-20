@@ -51,7 +51,7 @@
         throw e;
       }
     },
-    indisponiveis(data) { return this._get('indisponiveis?data=' + data); },
+    indisponiveis(data, profissionalId) { return this._get('indisponiveis?data=' + data + (profissionalId ? '&profissional_id=' + Number(profissionalId) : '')); },
     async agendar(dados) {
       try { return await this._post('agendar', dados); } catch (e) {
         if (e.status === 409 || e.codigo === 'DADOS_INVALIDOS') return { ok: false, erro: e.codigo };
@@ -59,7 +59,7 @@
       }
     },
     agendarAdmin(dados) { return this._post('admin/agendar', dados); },
-    reagendar(id, data, inicioMin) { return this._post('admin/reagendar', { id, data, inicio_min: inicioMin }); },
+    reagendar(id, data, inicioMin, profissionalId) { return this._post('admin/reagendar', { id, data, inicio_min: inicioMin, profissional_id: profissionalId ?? null }); },
 
     async entrar(usuario, senha) { const r = await this._post('admin/login', { usuario, senha }); guardar.set(r.token); },
     async sair() { try { await this._post('admin/logout'); } catch { /* ignora */ } guardar.set(null); },
@@ -74,8 +74,14 @@
     caixaDiario(data) { return this._get('admin/caixa-diario?data=' + data); },
     abrirCaixa(data, valor, observacao) { return this._post('admin/caixa-diario/abrir', { data, valor_abertura: valor, observacao }); },
     fecharCaixa(data, valor) { return this._post('admin/caixa-diario/fechar', { data, valor_contado: valor }); },
-    /** tipo: 'sangria' | 'despesa' | 'reforco' — sempre no caixa de hoje. */
-    movimentoCaixa(tipo, valor, forma, descricao) { return this._post('admin/caixa-movimento', { tipo, valor, forma, descricao }); },
+    /** tipo: 'sangria' | 'despesa' | 'reforco' | 'vale' (vale precisa do barbeiro) — sempre no caixa de hoje. */
+    movimentoCaixa(tipo, valor, forma, descricao, profissionalId) { return this._post('admin/caixa-movimento', { tipo, valor, forma, descricao, profissional_id: profissionalId ?? null }); },
+    /* comissões: contrato (vale a partir de vigente_desde), vales pendentes, fechamentos */
+    salvarContrato(dados) { return this._post('admin/profissional-contrato', dados); },
+    valesPendentes() { return this._get('admin/vales-pendentes'); },
+    fechamentos() { return this._get('admin/fechamentos'); },
+    registrarFechamento(dados) { return this._post('admin/fechamento', dados); },
+    excluirFechamento(id) { return this._post('admin/fechamento/excluir', { id }); },
     excluirMovimentoCaixa(id) { return this._post('admin/caixa-movimento/excluir', { id }); },
     extrato(de, ate) { return this._get(`admin/extrato?de=${de}&ate=${ate}`); },
     vendasAvulsas(data) { return this._get('admin/vendas-avulsas?data=' + data); },
@@ -97,6 +103,7 @@
     excluir(tabela, id) { return this._post('admin/excluir/' + tabela, { id }); },
     salvarConfig(obj) { return this._post('admin/config', obj); },
     comboServicos(comboId, ids) { return this._post('admin/combo-servicos', { combo_id: comboId, servico_ids: ids }); },
+    salvarHorariosProf(profissionalId, horarios) { return this._post('admin/profissional-horarios', { profissional_id: profissionalId, horarios }); },
   };
 
   /* -------------------------------------------------------------- Supabase */
@@ -120,6 +127,7 @@
     sessaoSupa.set({ refresh: r.refresh_token, expira: Date.now() + (Number(r.expires_in) || 3600) * 1000 });
   }
 
+  const comProf = (id) => (id == null || id === '' ? {} : { p_profissional_id: Number(id) });
   const Supa = {
     nome: 'supabase',
     _h(extra) {
@@ -137,20 +145,31 @@
 
     async _site(admin) {
       const filtro = admin ? '' : '&ativo=eq.true';
-      const [conf, servicos, combos, horarios, galeria, produtos] = await Promise.all([
+      const [conf, servicos, combos, horarios, galeria, produtos, profissionais, horariosProf, contratos] = await Promise.all([
         this._rest('configuracoes?select=chave,valor'),
         this._rest('servicos?select=*&order=ordem,id' + filtro),
         this._rest('combos?select=*,combo_servicos(servico_id)&order=ordem,id' + filtro),
         this._rest('horarios_funcionamento?select=*&order=dia_semana'),
         this._rest('galeria?select=*&order=ordem,id' + filtro),
         admin ? this._rest('produtos?select=*&order=nome') : Promise.resolve([]),
+        // o site só pode ler nome e foto; sem a tabela (SQL ainda não rodado) segue como barbeiro único
+        this._rest(`profissionais?select=${admin ? '*' : 'id,nome,foto,ordem'}&order=ordem,id${filtro}`).catch(() => []),
+        this._rest('profissional_horarios?select=*&order=profissional_id,dia_semana').catch(() => []),
+        admin ? this._rest('profissional_contratos?select=*&order=profissional_id,vigente_desde').catch(() => []) : Promise.resolve([]),
       ]);
       const out = {
         config: Object.fromEntries(conf.map((r) => [r.chave, r.valor])),
         servicos, horarios, galeria,
+        // cada barbeiro leva o horário próprio (vazio = segue o da barbearia)
+        profissionais: profissionais.map((p) => ({
+          ...p, comissao_servicos: Number(p.comissao_servicos || 0), comissao_produtos: Number(p.comissao_produtos || 0),
+          horarios: horariosProf.filter((h) => h.profissional_id === p.id).map(({ profissional_id, ...h }) => h),
+        })),
         combos: combos.map(({ combo_servicos, ...c }) => ({ ...c, servico_ids: combo_servicos.map((x) => x.servico_id) })),
       };
       if (admin) {
+        const n = (v) => Number(v || 0);
+        out.contratos = contratos.map((c) => ({ ...c, comissao_servicos: n(c.comissao_servicos), comissao_produtos: n(c.comissao_produtos), valor_fixo: n(c.valor_fixo), aluguel_valor: n(c.aluguel_valor) }));
         out.bloqueios = await this._rest('bloqueios?select=*&order=data,inicio_min');
         out.produtos = produtos;
       }
@@ -158,12 +177,13 @@
     },
     carregarSite() { return this._site(false); },
     carregarAdmin() { return this._site(true); },
-    indisponiveis(data) { return this._rpc('get_indisponiveis', { p_data: data }); },
+    // o barbeiro só vai na chamada quando foi escolhido (funções antigas não conhecem o parâmetro)
+    indisponiveis(data, profissionalId) { return this._rpc('get_indisponiveis', { p_data: data, ...comProf(profissionalId) }); },
     async agendar(d) {
-      return this._rpc('criar_agendamento', { p_data: d.data, p_inicio_min: d.inicio_min, p_servico_ids: d.servico_ids, p_nome: d.nome, p_whatsapp: d.whatsapp });
+      return this._rpc('criar_agendamento', { p_data: d.data, p_inicio_min: d.inicio_min, p_servico_ids: d.servico_ids, p_nome: d.nome, p_whatsapp: d.whatsapp, ...comProf(d.profissional_id) });
     },
-    agendarAdmin(d) { return this._rpc('criar_agendamento_admin', { p_data: d.data, p_inicio_min: d.inicio_min, p_servico_ids: d.servico_ids, p_nome: d.nome, p_whatsapp: d.whatsapp || '' }); },
-    reagendar(id, data, inicioMin) { return this._rpc('reagendar_agendamento', { p_id: id, p_data: data, p_inicio_min: inicioMin }); },
+    agendarAdmin(d) { return this._rpc('criar_agendamento_admin', { p_data: d.data, p_inicio_min: d.inicio_min, p_servico_ids: d.servico_ids, p_nome: d.nome, p_whatsapp: d.whatsapp || '', ...comProf(d.profissional_id) }); },
+    reagendar(id, data, inicioMin, profissionalId) { return this._rpc('reagendar_agendamento', { p_id: id, p_data: data, p_inicio_min: inicioMin, ...comProf(profissionalId) }); },
 
     async entrar(email, senha) {
       const r = await pedir(cfg.supabaseUrl + '/auth/v1/token?grant_type=password', {
@@ -185,13 +205,16 @@
     /** Últimos agendamentos de um cliente, do mais recente para o mais antigo. */
     historicoCliente(id) { return this._agendamentos(`cliente_id=eq.${Number(id)}&order=data.desc,inicio_min.desc&limit=30`); },
     _agendamentos(filtro) {
-      return this._rest(`agendamentos?select=*,clientes(nome,whatsapp),agendamento_servicos(nome,duracao_min,preco),agendamento_produtos(nome,quantidade,preco_unitario,valor_total),recebimentos_agendamento(id,valor,forma,recebido_em),estornos(id,valor,forma,criado_em),remarcacoes(id,data_anterior,inicio_anterior,data_nova,inicio_novo,criado_em)&remarcacoes.order=id&${filtro}`)
-        .then((l) => l.map(({ clientes, agendamento_servicos, agendamento_produtos, recebimentos_agendamento, estornos: est, remarcacoes, cliente_id, ...a }) => {
+      const sel = (novo) => `agendamentos?select=*,clientes(nome,whatsapp),agendamento_servicos(nome,duracao_min,preco),agendamento_produtos(nome,quantidade,preco_unitario,valor_total),recebimentos_agendamento(id,valor,forma,recebido_em${novo ? ',recebido_por' : ''}),estornos(id,valor,forma,criado_em),remarcacoes(id,data_anterior,inicio_anterior,data_nova,inicio_novo,criado_em)${novo ? ',profissionais(id,nome)' : ''}`;
+      // banco ainda sem barbeiros/comissões (SQL não rodado): busca do jeito antigo em vez de derrubar a agenda
+      return this._rest(`${sel(true)}&remarcacoes.order=id&${filtro}`)
+        .catch((e) => { if (e.status === 400) return this._rest(`${sel(false)}&remarcacoes.order=id&${filtro}`); throw e; })
+        .then((l) => l.map(({ clientes, agendamento_servicos, agendamento_produtos, recebimentos_agendamento, estornos: est, remarcacoes, profissionais: profissional, cliente_id, ...a }) => {
           const pagamentos = (recebimentos_agendamento || []).map((p) => ({ ...p, valor: Number(p.valor) }));
           const estornos = (est || []).map((e) => ({ ...e, valor: Number(e.valor) }));
           const totalPago = Math.round(pagamentos.reduce((s, p) => s + p.valor, 0) * 100) / 100;
           const produtos = (agendamento_produtos || []).map((p) => ({ ...p, preco_unitario: Number(p.preco_unitario), valor_total: Number(p.valor_total) }));
-          return { ...a, valor_ajuste: Number(a.valor_ajuste || 0), valor_produtos: Number(a.valor_produtos || 0), cliente: clientes, servicos: agendamento_servicos, produtos, pagamentos, estornos, remarcacoes: remarcacoes || [], total_pago: totalPago, saldo_devedor: Math.max(0, Number(a.valor_total || 0) - totalPago) };
+          return { ...a, valor_ajuste: Number(a.valor_ajuste || 0), valor_produtos: Number(a.valor_produtos || 0), cliente: clientes, profissional: profissional || null, servicos: agendamento_servicos, produtos, pagamentos, estornos, remarcacoes: remarcacoes || [], total_pago: totalPago, saldo_devedor: Math.max(0, Number(a.valor_total || 0) - totalPago) };
         }));
     },
     cancelar(id, devolver = false) { return this._rpc('cancelar_agendamento', { p_agendamento_id: id, p_devolver: devolver }); },
@@ -267,7 +290,20 @@
     caixaDiario(data) { return this._rpc('caixa_diario_resumo', { p_data: data }); },
     abrirCaixa(data, valor, observacao) { return this._rpc('abrir_caixa_diario', { p_data: data, p_valor_abertura: valor, p_observacao: observacao }); },
     fecharCaixa(data, valor) { return this._rpc('fechar_caixa_diario', { p_data: data, p_valor_contado: valor }); },
-    movimentoCaixa(tipo, valor, forma, descricao) { return this._rpc('registrar_movimento_caixa', { p_tipo: tipo, p_valor: valor, p_forma: forma || 'dinheiro', p_descricao: descricao || '' }); },
+    movimentoCaixa(tipo, valor, forma, descricao, profissionalId) { return this._rpc('registrar_movimento_caixa', { p_tipo: tipo, p_valor: valor, p_forma: forma || 'dinheiro', p_descricao: descricao || '', ...comProf(profissionalId) }); },
+    async salvarContrato(d) {
+      await this._rest('profissional_contratos?on_conflict=profissional_id,vigente_desde', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify(d) });
+      return this._rest(`profissional_contratos?select=*&profissional_id=eq.${Number(d.profissional_id)}&order=vigente_desde`);
+    },
+    async valesPendentes() {
+      return (await this._rest('movimentos_caixa?select=id,profissional_id,data,valor,forma,descricao,criado_em&tipo=eq.vale&fechamento_id=is.null&order=data,id')).map((v) => ({ ...v, valor: Number(v.valor) }));
+    },
+    async fechamentos() {
+      return (await this._rest('fechamentos?select=*,profissionais(nome)&order=ate.desc,id.desc&limit=200'))
+        .map(({ profissionais, ...f }) => ({ ...f, profissional_nome: profissionais ? profissionais.nome : '' }));
+    },
+    registrarFechamento(d) { return this._rpc('registrar_fechamento', { p_dados: d }); },
+    excluirFechamento(id) { return this._rpc('excluir_fechamento', { p_id: id }); },
     excluirMovimentoCaixa(id) { return this._rpc('excluir_movimento_caixa', { p_id: id }); },
     async extrato(de, ate) { return (await this._rpc('extrato', { p_de: de, p_ate: ate })).map((l) => ({ ...l, valor: Number(l.valor) })); },
     vendasAvulsas(data) { return this._rpc('listar_vendas_avulsas', { p_data: data }); },
@@ -280,6 +316,12 @@
     salvarConfig(obj) {
       const linhas = Object.entries(obj).map(([chave, valor]) => ({ chave, valor: String(valor ?? '') }));
       return this._rest('configuracoes?on_conflict=chave', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates' }, body: JSON.stringify(linhas) });
+    },
+    /** horarios: 7 dias, ou [] para voltar a seguir o horário da barbearia. */
+    async salvarHorariosProf(profissionalId, horarios) {
+      await this._rest('profissional_horarios?profissional_id=eq.' + Number(profissionalId), { method: 'DELETE' });
+      // dia de folga guarda um intervalo padrão só para cumprir a regra da tabela
+      if (horarios.length) await this._rest('profissional_horarios', { method: 'POST', body: JSON.stringify(horarios.map((h) => ({ profissional_id: Number(profissionalId), dia_semana: h.dia_semana, ativo: !!h.ativo, ...(h.ativo ? { inicio_min: h.inicio_min, fim_min: h.fim_min } : { inicio_min: 480, fim_min: 1080 }) }))) });
     },
     async comboServicos(comboId, ids) {
       await this._rest('combo_servicos?combo_id=eq.' + comboId, { method: 'DELETE' });
@@ -361,6 +403,7 @@
         SERVICO_INVALIDO: 'Algum serviço selecionado não está mais disponível. Recomece o agendamento.',
         DADOS_INVALIDOS: 'Confira seu nome e WhatsApp.',
         MESMO_HORARIO: 'Escolha um horário diferente do atual.',
+        PROFISSIONAL_INVALIDO: 'Este barbeiro não está mais disponível. Escolha outro.',
         AGENDAMENTO_CANCELADO: 'Este agendamento está cancelado.',
         AGENDAMENTO_NAO_ENCONTRADO: 'Agendamento não encontrado. Atualize a página.',
         REDE: 'Sem conexão com o servidor. Tente novamente.',

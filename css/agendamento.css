@@ -83,6 +83,16 @@ body.app {
 
 /* etapa 3 — horários */
 .data-linha { display: flex; align-items: center; gap: 8px; color: var(--gold-2); font-size: 13px; margin-bottom: 18px; }
+/* escolha do barbeiro (só com dois ou mais) */
+.profs { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 6px; margin: 0 -2px 18px; scrollbar-width: thin; }
+.prof { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 92px; padding: 12px 10px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--surface); font-size: 13px; font-weight: 500; transition: .15s; }
+.prof:hover { border-color: var(--gold); }
+.prof[aria-pressed="true"] { border-color: var(--gold); background: var(--gold-soft); box-shadow: inset 0 0 0 1px var(--gold); color: #fff; font-weight: 600; }
+.prof__av { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--surface-2); color: var(--gold-2); font-size: 16px; font-weight: 600; }
+.prof__av svg { width: 20px; height: 20px; }
+.ticket__prof { display: flex; align-items: center; gap: 8px; padding: 12px 18px; border-bottom: 1px dashed var(--line-2); font-size: 14px; color: var(--muted); }
+.ticket__prof b { color: var(--text, #fff); }
+.ticket__prof svg { width: 16px; height: 16px; color: var(--gold-2); }
 .slots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .slot { min-height: 46px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--surface); font-size: 14px; font-weight: 500; transition: .15s; }
 .slot:not(:disabled):hover { border-color: var(--gold); }
