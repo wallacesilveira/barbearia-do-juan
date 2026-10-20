@@ -91,7 +91,7 @@ create table if not exists agendamentos (
   valor_produtos numeric(10,2) not null default 0,
   combos_aplicados text default '',
   valor_consulta boolean not null default false,
-  status text not null default 'confirmado' check (status in ('confirmado','cancelado')),
+  status text not null default 'confirmado' check (status in ('confirmado','cancelado','falta')),
   criado_em timestamptz not null default now(),
   check (fim_min > inicio_min),
   -- Garantia final contra dupla reserva: o PRÓPRIO BANCO recusa dois agendamentos
@@ -690,6 +690,17 @@ revoke all on function public.ajustar_agendamento(bigint, numeric) from public;
 grant execute on function public.caixa_resumo() to authenticated;
 grant execute on function public.ajustar_agendamento(bigint, numeric) to authenticated;
 
+-- Dinheiro não entra numa gaveta já conferida: com o caixa de hoje fechado, só pix/cartão/outro.
+create or replace function public.exigir_caixa_nao_fechado() returns void
+language plpgsql security definer stable set search_path = public as $$
+begin
+  if exists (select 1 from caixas_diarios where data = (now() at time zone 'America/Sao_Paulo')::date and status = 'fechado') then
+    raise exception 'CAIXA_FECHADO_DINHEIRO' using errcode = '23505';
+  end if;
+end;
+$$;
+revoke all on function public.exigir_caixa_nao_fechado() from public, anon, authenticated;
+
 create or replace function public.registrar_recebimento(p_agendamento_id bigint, p_valor numeric, p_forma text) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare
@@ -706,6 +717,7 @@ begin
   if not found then raise exception 'AGENDAMENTO_NAO_ENCONTRADO' using errcode = 'P0002'; end if;
   select coalesce(sum(valor), 0) into v_pago from recebimentos_agendamento where agendamento_id = p_agendamento_id;
   if p_valor > v_ag.valor_total - v_pago then raise exception 'RECEBIMENTO_EXCEDE_SALDO' using errcode = '22023'; end if;
+  if p_forma = 'dinheiro' then perform public.exigir_caixa_nao_fechado(); end if;
   insert into recebimentos_agendamento (agendamento_id, valor, forma)
     values (p_agendamento_id, p_valor, p_forma) returning * into v_recebimento;
   return to_jsonb(v_recebimento);
@@ -919,22 +931,33 @@ grant execute on function public.registrar_abertura_lembrete(bigint) to authenti
 -- Cancela e devolve ao estoque os produtos vendidos na comanda.
 -- p_devolver = true: devolve ao cliente o que ele pagou (um estorno por forma, no caixa de hoje).
 drop function if exists public.cancelar_agendamento(bigint);
-create or replace function public.cancelar_agendamento(p_agendamento_id bigint, p_devolver boolean default false) returns jsonb
+-- Encerra um agendamento confirmado (cancelado ou falta): produtos voltam ao estoque e,
+-- com p_devolver = true, devolve ao cliente o que ele pagou (um estorno por forma, no caixa de hoje).
+create or replace function public.encerrar_agendamento(p_agendamento_id bigint, p_devolver boolean, p_status text) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare
   v_ag agendamentos%rowtype;
   v_it record;
   v_devolvidos int := 0;
   v_estornado numeric(10,2) := 0;
+  v_agora timestamp := now() at time zone 'America/Sao_Paulo';
 begin
   if not public.is_admin() then raise exception 'NAO_AUTORIZADO' using errcode = '42501'; end if;
+  if p_status not in ('cancelado','falta') then raise exception 'DADOS_INVALIDOS' using errcode = '22023'; end if;
   select * into v_ag from agendamentos where id = p_agendamento_id for update;
   if not found then raise exception 'AGENDAMENTO_NAO_ENCONTRADO' using errcode = 'P0002'; end if;
+  if p_status = 'falta' then
+    if v_ag.status <> 'confirmado' then raise exception 'AGENDAMENTO_CANCELADO' using errcode = '22023'; end if;
+    if v_ag.data > v_agora::date or (v_ag.data = v_agora::date
+       and v_ag.inicio_min > extract(hour from v_agora)::int * 60 + extract(minute from v_agora)::int) then
+      raise exception 'AINDA_NAO_COMECOU' using errcode = '22023';
+    end if;
+  end if;
   if v_ag.status = 'confirmado' then
-    update agendamentos set status = 'cancelado' where id = p_agendamento_id;
+    update agendamentos set status = p_status where id = p_agendamento_id;
     if coalesce(p_devolver, false) then
       if exists (select 1 from recebimentos_agendamento where agendamento_id = p_agendamento_id and forma = 'dinheiro')
-         and exists (select 1 from caixas_diarios where data = (now() at time zone 'America/Sao_Paulo')::date and status = 'fechado') then
+         and exists (select 1 from caixas_diarios where data = v_agora::date and status = 'fechado') then
         raise exception 'CAIXA_JA_FECHADO' using errcode = '23505';
       end if;
       insert into estornos (agendamento_id, valor, forma)
@@ -945,15 +968,34 @@ begin
     for v_it in select produto_id, quantidade from agendamento_produtos where agendamento_id = p_agendamento_id and produto_id is not null loop
       update produtos set estoque = estoque + v_it.quantidade where id = v_it.produto_id;
       insert into movimentos_estoque (produto_id, quantidade, tipo, motivo, agendamento_id)
-        values (v_it.produto_id, v_it.quantidade, 'entrada', 'Devolução: agendamento ' || v_ag.codigo || ' cancelado', p_agendamento_id);
+        values (v_it.produto_id, v_it.quantidade, 'entrada',
+                'Devolução: agendamento ' || v_ag.codigo || case when p_status = 'falta' then ' com falta' else ' cancelado' end, p_agendamento_id);
       v_devolvidos := v_devolvidos + v_it.quantidade;
     end loop;
   end if;
   return jsonb_build_object('ok', true, 'produtos_devolvidos', v_devolvidos, 'valor_estornado', v_estornado);
 end;
 $$;
+revoke all on function public.encerrar_agendamento(bigint, boolean, text) from public, anon, authenticated;
+
+create or replace function public.cancelar_agendamento(p_agendamento_id bigint, p_devolver boolean default false) returns jsonb
+language plpgsql security definer set search_path = public as $$
+begin
+  return public.encerrar_agendamento(p_agendamento_id, p_devolver, 'cancelado');
+end;
+$$;
 revoke all on function public.cancelar_agendamento(bigint, boolean) from public;
 grant execute on function public.cancelar_agendamento(bigint, boolean) to authenticated;
+
+-- Marca falta: só depois que o horário começou.
+create or replace function public.marcar_falta(p_agendamento_id bigint, p_devolver boolean default false) returns jsonb
+language plpgsql security definer set search_path = public as $$
+begin
+  return public.encerrar_agendamento(p_agendamento_id, p_devolver, 'falta');
+end;
+$$;
+revoke all on function public.marcar_falta(bigint, boolean) from public, anon;
+grant execute on function public.marcar_falta(bigint, boolean) to authenticated;
 
 -- Muda data/horário mantendo serviços, valores, pagamentos e produtos. Mesmas regras do agendamento pelo painel.
 create or replace function public.reagendar_agendamento(p_id bigint, p_data date, p_inicio_min int) returns jsonb
@@ -1028,7 +1070,8 @@ begin
                  count(a.id) filter (where a.status = 'confirmado' and a.data > v_hoje) as futuros,
                  coalesce(sum(a.valor_total) filter (where a.status = 'confirmado' and a.data <= v_hoje), 0) as total_gasto,
                  max(a.data) filter (where a.status = 'confirmado' and a.data <= v_hoje) as ultima_visita,
-                 min(a.data) filter (where a.status = 'confirmado' and a.data > v_hoje) as proxima_visita
+                 min(a.data) filter (where a.status = 'confirmado' and a.data > v_hoje) as proxima_visita,
+                 count(a.id) filter (where a.status = 'falta') as faltas
             from clientes c left join agendamentos a on a.cliente_id = c.id
            group by c.id) x;
   select jsonb_agg(jsonb_build_object('dia', d, 'agendamentos',
@@ -1178,6 +1221,7 @@ begin
     select * into v_cliente from clientes where id = p_cliente_id;
     if not found then raise exception 'CLIENTE_NAO_ENCONTRADO' using errcode = 'P0002'; end if;
   end if;
+  if p_forma = 'dinheiro' then perform public.exigir_caixa_nao_fechado(); end if;
   insert into vendas_avulsas (cliente_id, cliente_nome, valor_total, forma)
     values (p_cliente_id, coalesce(v_cliente.nome, ''), 0, p_forma)
     returning id into v_venda_id;

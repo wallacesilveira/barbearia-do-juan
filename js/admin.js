@@ -9,7 +9,7 @@
   let D = { config: {}, servicos: [], produtos: [], combos: [], horarios: [], galeria: [], bloqueios: [] };
   const S = {
     dia: null, mes: null, diaAg: null, mostrarCancelados: false, mostrarPassados: false, ag: new Map(),
-    periodo: 'hoje', buscaCli: '', ordemCli: 'visitas', limiteCli: 30,
+    periodo: 'hoje', buscaCli: '', ordemCli: 'visitas', limiteCli: 30, diasSumido: 45, todosSumidos: false,
     alertas: { nao_lidos: 0, alertas: [] }, ultimoAlerta: null, timerAlertas: null,
   };
   let rotaAtual = 'dashboard';
@@ -63,6 +63,7 @@
   /** Situação financeira do agendamento: [rótulo, variante]. */
   function situacao(a) {
     if (a.status === 'cancelado') return ['Cancelado', 'err'];
+    if (a.status === 'falta') return ['Faltou', 'warn'];
     const total = Number(a.valor_total || 0), pago = Number(a.total_pago || 0);
     if (a.valor_consulta && !total && !pago) return ['A consultar', 'muted'];
     if (total > 0 && pago >= total - 0.004) return ['Pago', 'ok'];
@@ -93,10 +94,12 @@
     CAIXA_JA_ABERTO: 'O caixa deste dia já foi aberto.',
     CAIXA_JA_FECHADO: 'O caixa de hoje já foi fechado.',
     CAIXA_NAO_ABERTO: 'Abra o caixa de hoje primeiro.',
+    CAIXA_FECHADO_DINHEIRO: 'O caixa de hoje já foi fechado. Registre em pix, cartão ou outro, ou receba o dinheiro amanhã.',
     SALDO_GAVETA_INSUFICIENTE: 'O valor é maior do que deveria haver na gaveta.',
     DESCRICAO_OBRIGATORIA: 'Diga com o que foi a despesa.',
     MOVIMENTO_NAO_ENCONTRADO: 'Lançamento não encontrado. Atualize a página.',
     AGENDAMENTO_CANCELADO: 'Este agendamento está cancelado.',
+    AINDA_NAO_COMECOU: 'O horário ainda não começou. Para desmarcar antes, use Cancelar horário.',
     AGENDAMENTO_PASSADO: 'O horário deste agendamento já passou.',
     AGENDAMENTO_NAO_ENCONTRADO: 'Agendamento não encontrado. Atualize a página.',
     PRODUTO_NAO_ENCONTRADO: 'Produto indisponível. Atualize a página.',
@@ -330,7 +333,7 @@
   /* =================================================== Agendamento: linha e detalhe */
   function linhaAg(a, extra = '') {
     const nomes = a.servicos.map((s) => s.nome).join(' + ');
-    return `<button type="button" class="ag-row${a.status === 'cancelado' ? ' cancelado' : ''}${extra}" data-ag="${a.id}">
+    return `<button type="button" class="ag-row${a.status === 'cancelado' ? ' cancelado' : a.status === 'falta' ? ' falta' : ''}${extra}" data-ag="${a.id}">
       <span class="ag-hora">${A.fmtMin(a.inicio_min)}<small>até ${A.fmtMin(a.fim_min)}</small></span>
       <span class="ag-info"><span class="ag-nome">${esc(BJ.nome(a.cliente.nome))}</span><span class="ag-serv">${esc(nomes)}</span></span>
       <span class="ag-dir"><span class="ag-preco">${esc(valorAg(a))}</span>${pill(situacao(a))}</span></button>`;
@@ -366,6 +369,7 @@
     const pagamentos = (a.pagamentos || []).map((p) => `<li><span>${esc(FORMAS[p.forma] || p.forma)}<small>${esc(quando(p.recebido_em))}</small></span><b>${A.fmtBRL(p.valor)}</b></li>`).join('')
       + (a.estornos || []).map((e) => `<li class="neg"><span>Devolvido · ${esc(FORMAS[e.forma] || e.forma)}<small>${esc(quando(e.criado_em))}</small></span><b>− ${A.fmtBRL(e.valor)}</b></li>`).join('');
     const ficouComBarbearia = !confirmado && pago > 0 && !(a.estornos || []).length;
+    const faltou = a.status === 'falta';
     const statusLembrete = ultimoLembrete
       ? `Conversa aberta ${esc(quando(ultimoLembrete))}${aberturas > 1 ? ` · ${aberturas} vezes` : ''}`
       : (futuro ? 'Ainda não enviado.' : 'O horário já passou.');
@@ -388,7 +392,7 @@
           <div class="progresso${pct >= 100 ? ' completo' : ''}" role="progressbar" aria-label="Valor pago" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>
           ${pagamentos ? `<ul class="recibo recibo--lista">${pagamentos}</ul>` : '<p class="det-vazio">Nenhum pagamento registrado.</p>'}
           ${confirmado && saldo > 0 ? `<p class="det-falta">Falta receber <strong>${A.fmtBRL(saldo)}</strong></p>` : ''}
-          ${ficouComBarbearia ? `<p class="det-vazio">Cancelado sem devolução: o valor pago ficou com a barbearia.</p>` : ''}
+          ${ficouComBarbearia ? `<p class="det-vazio">${faltou ? 'Falta sem devolução' : 'Cancelado sem devolução'}: o valor pago ficou com a barbearia.</p>` : ''}
         </section>
         ${confirmado && temWa ? `<section class="det-sec det-lembrete"><div><h3>Lembrete por WhatsApp</h3><p id="lembrete-status">${statusLembrete}</p></div>
           ${lembreteOk ? `<a class="btn btn--sm btn--sec" id="lembrete-link" href="${esc(urlLembrete)}" target="_blank" rel="noopener">${BJIcons.svg('whatsapp')}${aberturas ? 'Reenviar' : 'Enviar'}</a>` : ''}</section>` : ''}
@@ -396,6 +400,7 @@
         <p class="det-meta">${a.criado_em ? `Criado em ${esc(quando(a.criado_em, true))} · ` : ''}Código ${esc(a.codigo)}</p>`,
       rodape: `${confirmado ? '<button type="button" class="btn-texto perigo" id="cancelar-ag">Cancelar horário</button>' : ''}
         <span class="modal__espaco"></span>
+        ${confirmado && !futuro ? '<button type="button" class="btn btn--sec" id="falta-ag"><i data-icon="ban"></i>Faltou</button>' : ''}
         ${confirmado ? '<button type="button" class="btn btn--sec" id="remarcar-ag"><i data-icon="calendar"></i>Reagendar</button>' : ''}
         ${confirmado ? '<button type="button" class="btn btn--sec" id="ajuste-ag"><i data-icon="sliders"></i>Ajustar valor</button>' : ''}
         ${confirmado && temProdutos ? '<button type="button" class="btn btn--sec" id="vender-produto-ag"><i data-icon="box"></i>Produto</button>' : ''}
@@ -416,9 +421,13 @@
         on('ajuste-ag', () => formAjuste(a, aoMudar));
         on('remarcar-ag', () => abrirAgendamentoAdmin(null, () => aoMudar(), a));
         on('vender-produto-ag', () => formVenda(a, aoMudar));
-        on('cancelar-ag', async () => {
-          const avisos = [`Cancelar o horário de ${nome} em ${A.fmtData(a.data)} às ${A.fmtMin(a.inicio_min)}? O horário volta a ficar livre na agenda.`];
+        /** Cancelar ou marcar falta: mesmo fluxo (devolver ou não o que foi pago; produtos voltam ao estoque). */
+        const encerrar = async (falta) => {
+          const avisos = [falta
+            ? `Marcar que ${nome} não veio ao horário de ${A.fmtData(a.data)} às ${A.fmtMin(a.inicio_min)}? A falta fica registrada no cadastro do cliente e não conta como visita nem faturamento.`
+            : `Cancelar o horário de ${nome} em ${A.fmtData(a.data)} às ${A.fmtMin(a.inicio_min)}? O horário volta a ficar livre na agenda.`];
           if ((a.produtos || []).length) avisos.push('Os produtos desta comanda voltam para o estoque.');
+          const acao = falta ? 'Marcar falta' : 'Cancelar';
           let devolver = false;
           if (pago > 0) {
             const porForma = {};
@@ -426,20 +435,22 @@
             const detalhe = Object.entries(porForma).map(([f, v]) => `${FORMAS[f] || f} ${A.fmtBRL(v)}`).join(' · ');
             avisos.push(`O cliente já pagou ${A.fmtBRL(pago)} (${detalhe}). Se devolver, o valor sai do caixa de hoje na mesma forma em que foi pago. Se não devolver, ele fica com a barbearia (ex.: taxa por falta).`);
             const r = await escolha(avisos, [
-              { rotulo: 'Cancelar sem devolver', valor: 'manter' },
-              { rotulo: `Cancelar e devolver ${A.fmtBRL(pago)}`, classe: 'btn--perigo', valor: 'devolver' },
+              { rotulo: `${acao} sem devolver`, valor: 'manter' },
+              { rotulo: `${acao} e devolver ${A.fmtBRL(pago)}`, classe: 'btn--perigo', valor: 'devolver' },
             ]);
             if (!r) return;
             devolver = r === 'devolver';
-          } else if (!(await confirma(avisos, 'Cancelar agendamento'))) return;
-          const r = await seguro(() => Api.cancelar(a.id, devolver));
+          } else if (!(await confirma(avisos, falta ? 'Marcar falta' : 'Cancelar agendamento'))) return;
+          const r = await seguro(() => (falta ? Api.marcarFalta(a.id, devolver) : Api.cancelar(a.id, devolver)));
           if (r) {
-            const partes = ['Agendamento cancelado.'];
+            const partes = [falta ? 'Falta registrada.' : 'Agendamento cancelado.'];
             if (Number(r.valor_estornado) > 0) partes.push(`${A.fmtBRL(r.valor_estornado)} devolvidos ao cliente.`);
             if (r.produtos_devolvidos) partes.push(`${plural(r.produtos_devolvidos, 'produto voltou', 'produtos voltaram')} ao estoque.`);
             fecharModal(); toast(partes.join(' ')); await recarregar(); aoMudar();
           }
-        });
+        };
+        on('cancelar-ag', () => encerrar(false));
+        on('falta-ag', () => encerrar(true));
       },
     });
   }
@@ -796,7 +807,10 @@
     const [todos, caixa] = await Promise.all([Api.agendamentos(dia, dia), ehHoje ? Api.caixaDiario(dia).catch(() => null) : null]);
     todos.forEach((a) => S.ag.set(String(a.id), a));
     const ativos = todos.filter((a) => a.status === 'confirmado');
-    const cancelados = todos.length - ativos.length;
+    const cancelados = todos.filter((a) => a.status === 'cancelado').length;
+    const faltas = todos.filter((a) => a.status === 'falta').length;
+    // quem faltou continua na lista do dia (com a etiqueta); cancelados ficam de fora
+    const listaDia = todos.filter((a) => a.status !== 'cancelado');
     const soma = (f) => centavos(ativos.reduce((s, a) => s + Number(f(a) || 0), 0));
     const previsto = soma((a) => a.valor_total), recebido = soma((a) => a.total_pago), falta = soma((a) => a.saldo_devedor);
     const mins = ativos.reduce((s, a) => s + a.duracao_min, 0);
@@ -812,7 +826,7 @@
           <button type="button" class="btn btn--solid" data-admin-agendar><i data-icon="plus"></i>Novo agendamento</button></div></div>
       ${caixa && caixa.status === 'nao_aberto' ? `<a class="aviso-barra" href="#/caixa">${BJIcons.svg('wallet')}<span><b>O caixa de hoje ainda não foi aberto.</b> Registre o troco inicial para conferir o fechamento no fim do dia.</span><span class="aviso-barra__acao">Abrir caixa</span></a>` : ''}
       <div class="kpis">
-        ${kpi('Agendamentos', ativos.length, cancelados ? plural(cancelados, 'cancelado', 'cancelados') : (mins ? A.fmtDur(mins) + ' de agenda' : 'Agenda livre'))}
+        ${kpi('Agendamentos', ativos.length, cancelados || faltas ? [faltas ? plural(faltas, 'falta', 'faltas') : '', cancelados ? plural(cancelados, 'cancelado', 'cancelados') : ''].filter(Boolean).join(' · ') : (mins ? A.fmtDur(mins) + ' de agenda' : 'Agenda livre'))}
         ${kpi('Previsto', A.fmtBRL(previsto))}
         ${kpi('Recebido', A.fmtBRL(recebido), previsto ? Math.round((recebido / previsto) * 100) + '% do previsto' : '')}
         ${kpi('A receber', A.fmtBRL(falta), '', falta > 0 ? 'kpi--alerta' : '')}
@@ -823,7 +837,7 @@
           <span class="destaque__info"><b>${esc(BJ.nome(atual.cliente.nome))}</b><span>${esc(atual.servicos.map((s) => s.nome).join(' + '))}</span></span>
           <span class="destaque__seta">${BJIcons.svg('right')}</span></button>` : ''}
       <div class="cartao"><div class="cartao__cab"><h2>Agenda do dia</h2><a class="link" href="#/agendamentos">Ver agenda completa</a></div>
-        ${ativos.length ? `<div class="lista">${ativos.map((a) => linhaAg(a, atual && a.id === atual.id ? ' atual' : (ehHoje && a.fim_min <= agoraMin ? ' passado' : ''))).join('')}</div>`
+        ${listaDia.length ? `<div class="lista">${listaDia.map((a) => linhaAg(a, atual && a.id === atual.id ? ' atual' : (ehHoje && a.fim_min <= agoraMin ? ' passado' : ''))).join('')}</div>`
           : vazio('calendar', 'Nenhum agendamento neste dia', ehHoje ? 'Os horários marcados pelo site aparecem aqui automaticamente.' : '', '<button type="button" class="btn btn--sm btn--sec" data-admin-agendar>Agendar cliente</button>')}</div>`;
     c.onclick = (e) => {
       if (e.target.closest('[data-admin-agendar]')) return abrirAgendamentoAdmin(S.dia, (d) => { S.dia = d; refazer(); });
@@ -856,7 +870,7 @@
       const fechado = !A.janelaDoDia(iso, D.horarios);
       cel += `<button type="button" data-dia="${iso}" class="${iso === S.diaAg ? 'sel' : ''}${iso === hojeIso() ? ' hoje' : ''}${fechado ? ' fechado' : ''}" aria-label="${esc(dataLonga(iso))}${n ? ', ' + plural(n, 'agendamento', 'agendamentos') : ''}" ${iso === S.diaAg ? 'aria-pressed="true"' : ''}>${d}${n ? `<i>${n}</i>` : ''}</button>`;
     }
-    const doDia = lista.filter((a) => a.data === S.diaAg && (S.mostrarCancelados || a.status === 'confirmado'));
+    const doDia = lista.filter((a) => a.data === S.diaAg && (S.mostrarCancelados || a.status !== 'cancelado'));
     const canceladosDia = lista.filter((a) => a.data === S.diaAg && a.status === 'cancelado').length;
     const totalDia = centavos(doDia.filter((a) => a.status === 'confirmado').reduce((s, a) => s + Number(a.valor_total), 0));
     c.innerHTML = `<div class="pg-topo"><div><h1>Agenda</h1><p>Escolha um dia no calendário para ver os horários marcados.</p></div>
@@ -1084,10 +1098,32 @@
           const cls = !abertos.has(s.dia) ? ' fechado' : temDiferenca && s.agendamentos === maxAberto ? ' top' : temDiferenca && s.agendamentos === minAberto ? ' baixo' : '';
           return `<div class="coluna${cls}"><b>${abertos.has(s.dia) || s.agendamentos ? s.agendamentos : ''}</b><span class="coluna__barra" style="height:${s.agendamentos ? Math.max(4, Math.round((s.agendamentos / maxSemana) * 100)) : 0}%"></span><small>${A.DIAS_CURTOS[s.dia]}</small></div>`;
         }).join('')}</div>` : vazio('chart', 'Ainda não há atendimentos realizados', 'O gráfico aparece depois dos primeiros atendimentos.')}</div>
+      <div class="cartao" id="cli-sumidos"></div>
       <div class="cartao"><div class="cartao__cab"><h2>Todos os clientes</h2>
           <div class="ferramentas"><label class="busca">${BJIcons.svg('search')}<input type="search" id="cli-busca" placeholder="Buscar por nome ou telefone" value="${esc(S.buscaCli)}" aria-label="Buscar cliente"></label>
             <select id="cli-ordem" aria-label="Ordenar por">${[['visitas', 'Mais visitas'], ['gasto', 'Maior valor'], ['recente', 'Visita mais recente'], ['nome', 'Nome (A–Z)']].map(([k, v]) => `<option value="${k}" ${S.ordemCli === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div></div>
         <div id="cli-lista"></div></div>`;
+
+    /** Já vieram, não têm horário marcado e não aparecem há mais de S.diasSumido dias. Os mais frequentes primeiro. */
+    const diasDesde = (iso) => Math.round((Date.parse(hojeIso() + 'T12:00:00Z') - Date.parse(iso + 'T12:00:00Z')) / 864e5);
+    const linkAgendar = new URL('agendamento.html', location.href).href;
+    const sumidos = () => {
+      const lista = clientes
+        .filter((x) => x.visitas > 0 && !x.proxima_visita && x.ultima_visita && diasDesde(x.ultima_visita) > S.diasSumido)
+        .sort((a, b) => b.visitas - a.visitas || b.total_gasto - a.total_gasto);
+      const vis = S.todosSumidos ? lista : lista.slice(0, 8);
+      const msg = (x) => `Olá, ${x.nome.split(' ')[0]}! Aqui é da ${D.config.nome || 'Barbearia do Juan'}. Faz um tempinho que você não aparece, sentimos sua falta! Que tal marcar um horário? ${linkAgendar}`;
+      $('#cli-sumidos').innerHTML = `<div class="cartao__cab"><div><h2>Clientes sumidos</h2>
+          <p>${lista.length ? `${plural(lista.length, 'cliente', 'clientes')} sem vir há mais de ${S.diasSumido} dias e sem horário marcado` : `Ninguém sumido há mais de ${S.diasSumido} dias`}</p></div>
+          <div class="seg" role="tablist" aria-label="Sem vir há mais de">${[30, 45, 60].map((n) => `<button type="button" role="tab" aria-selected="${n === S.diasSumido}" data-sumido="${n}">${n} dias</button>`).join('')}</div></div>
+        ${lista.length ? `<ul class="sumidos">${vis.map((x) => `<li>
+            <span class="avatar avatar--sm">${esc(iniciais(x.nome))}</span>
+            <span class="sumidos__txt"><b>${esc(x.nome)}</b><small>Última visita há ${diasDesde(x.ultima_visita)} dias · ${plural(x.visitas, 'visita', 'visitas')} · ${A.fmtBRL(x.total_gasto)}</small></span>
+            ${telValido(digitos(x.whatsapp)) ? `<a class="btn btn--sm btn--sec" href="${esc(waCliente(x.whatsapp))}?text=${encodeURIComponent(msg(x))}" target="_blank" rel="noopener">${BJIcons.svg('whatsapp')}Chamar</a>` : '<span class="sumidos__sem">Sem telefone</span>'}</li>`).join('')}</ul>
+          ${lista.length > vis.length ? `<div class="mais"><button type="button" class="btn btn--sm btn--sec" data-todos-sumidos>Mostrar todos (${lista.length})</button></div>` : ''}`
+          : `<p class="vendas-vazio">Bom sinal: todos os clientes atendidos voltaram ou já têm horário marcado.</p>`}`;
+    };
+    sumidos();
 
     const lista = () => {
       const q = S.buscaCli.trim().toLowerCase();
@@ -1104,7 +1140,7 @@
           <div class="tabela__cab" role="row"><span role="columnheader">Cliente</span><span role="columnheader">Visitas</span><span role="columnheader">Total</span><span role="columnheader">Última visita</span><span role="columnheader">Próxima</span><span role="columnheader"><span class="sr-only">WhatsApp</span></span></div>
           ${vis.map((x) => `<div class="tabela__linha" role="row">
             <span class="cli" role="cell"><span class="avatar avatar--sm">${esc(iniciais(x.nome))}</span><span><b>${esc(x.nome)}</b><small>${x.whatsapp ? esc(fmtTel(x.whatsapp)) : 'Sem telefone'}</small></span></span>
-            <span role="cell" data-rot="Visitas">${x.visitas}${x.visitas >= 5 ? ' <span class="pill pill--ok">Fiel</span>' : ''}</span>
+            <span role="cell" data-rot="Visitas">${x.visitas}${x.visitas >= 5 ? ' <span class="pill pill--ok">Fiel</span>' : ''}${x.faltas ? ` <span class="pill pill--warn" title="Marcou e não veio">${plural(x.faltas, 'falta', 'faltas')}</span>` : ''}</span>
             <span role="cell" data-rot="Total">${A.fmtBRL(x.total_gasto)}</span>
             <span role="cell" data-rot="Última visita">${x.ultima_visita ? A.fmtData(x.ultima_visita) : '—'}</span>
             <span role="cell" data-rot="Próxima">${x.proxima_visita ? A.fmtData(x.proxima_visita) : '—'}</span>
@@ -1118,6 +1154,9 @@
     c.onchange = (e) => { if (e.target.id === 'cli-ordem') { S.ordemCli = e.target.value; lista(); } };
     c.onclick = (e) => {
       if (e.target.closest('[data-mais]')) { S.limiteCli += 30; lista(); return; }
+      const sm = e.target.closest('[data-sumido]');
+      if (sm) { S.diasSumido = Number(sm.dataset.sumido); S.todosSumidos = false; sumidos(); $(`[data-sumido="${S.diasSumido}"]`).focus(); return; }
+      if (e.target.closest('[data-todos-sumidos]')) { S.todosSumidos = true; sumidos(); return; }
       if (e.target.closest('[data-novo-cli]')) return formCliente(null, refazer);
       const ed = e.target.closest('[data-editar-cli]');
       if (ed) formCliente(clientes.find((x) => String(x.id) === ed.dataset.editarCli), refazer);
@@ -1132,7 +1171,7 @@
     abrirModal({
       titulo: novo ? 'Novo cliente' : 'Editar contato',
       corpo: `${novo ? '<p class="sub">Cadastre um cliente para encontrá-lo depois ao agendar pelo painel.</p>' : `<div class="det-cab"><span class="avatar">${esc(iniciais(cli.nome))}</span><div class="det-cab__txt"><strong>${esc(cli.nome)}</strong>
-          <span>${plural(cli.visitas, 'visita', 'visitas')}${cli.ultima_visita ? ' · última em ' + A.fmtData(cli.ultima_visita) : ''}</span></div></div>`}
+          <span>${plural(cli.visitas, 'visita', 'visitas')}${cli.faltas ? ' · ' + plural(cli.faltas, 'falta', 'faltas') : ''}${cli.ultima_visita ? ' · última em ' + A.fmtData(cli.ultima_visita) : ''}</span></div></div>`}
         <div class="campo"><label for="cli-nome">Nome</label><input id="cli-nome" maxlength="80" autocomplete="off" value="${esc(novo ? '' : cli.nome)}" placeholder="Nome e sobrenome" required></div>
         <div class="campo"><label for="cli-whats">WhatsApp <span class="opcional">opcional</span></label><input id="cli-whats" ${CAMPO_TEL} value="${esc(foraDoPadrao ? atual : BJ.tel(atual))}">
           ${foraDoPadrao ? `<small class="aviso-campo">O número salvo (${esc(atual)}) está fora do padrão. Confira e corrija.</small>` : '<small>DDD + número. Deixe vazio se o cliente não tiver.</small>'}</div>

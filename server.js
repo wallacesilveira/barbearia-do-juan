@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS agendamentos (
   lembrete_enviado_em TEXT, lembrete_envios INTEGER NOT NULL DEFAULT 0,
   lembrete_aberto_em TEXT, lembrete_aberturas INTEGER NOT NULL DEFAULT 0,
   combos_aplicados TEXT DEFAULT '', valor_consulta INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'confirmado' CHECK (status IN ('confirmado','cancelado')), criado_em TEXT DEFAULT CURRENT_TIMESTAMP);
+  status TEXT NOT NULL DEFAULT 'confirmado' CHECK (status IN ('confirmado','cancelado','falta')), criado_em TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS recebimentos_agendamento (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   agendamento_id INTEGER NOT NULL REFERENCES agendamentos(id) ON DELETE CASCADE,
@@ -165,6 +165,30 @@ try {
   const colsCli = db.prepare('PRAGMA table_info(clientes)').all().map((c) => c.name);
   if (!colsCli.includes('email')) db.exec("ALTER TABLE clientes ADD COLUMN email TEXT NOT NULL DEFAULT ''");
   if (!colsCli.includes('aniversario')) db.exec('ALTER TABLE clientes ADD COLUMN aniversario TEXT');
+}
+// status 'falta' (cliente não apareceu): o SQLite não altera um CHECK existente, então a tabela é recriada uma única vez
+{
+  const def = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agendamentos'").get().sql;
+  if (!def.includes("'falta'")) {
+    const nova = def.replace(/^CREATE TABLE (IF NOT EXISTS )?"?agendamentos"?/i, 'CREATE TABLE agendamentos_novo')
+      .replace("CHECK (status IN ('confirmado','cancelado'))", "CHECK (status IN ('confirmado','cancelado','falta'))");
+    if (!nova.includes("'falta'") || !nova.startsWith('CREATE TABLE agendamentos_novo')) throw new Error('Não consegui preparar a tabela agendamentos para o status "falta".');
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.exec('BEGIN');
+    try {
+      db.exec(nova);
+      db.exec('INSERT INTO agendamentos_novo SELECT * FROM agendamentos');
+      db.exec('DROP TABLE agendamentos');
+      db.exec('ALTER TABLE agendamentos_novo RENAME TO agendamentos');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_agend_data ON agendamentos (data, status)');
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    } finally {
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+  }
 }
 
 /* --------------------------------------------------------------- dados base */
@@ -379,6 +403,13 @@ function devolvidoDoDia(data) {
   return centavos(db.prepare(`SELECT COALESCE(SUM(valor), 0) AS total
     FROM estornos WHERE forma = 'dinheiro' AND date(criado_em) = ?`).get(data).total || 0);
 }
+/** Dinheiro não entra numa gaveta já conferida: com o caixa de hoje fechado, só pix/cartão/outro. */
+function exigirCaixaNaoFechado() {
+  const caixa = db.prepare('SELECT status FROM caixas_diarios WHERE data = ?').get(agoraSP().data);
+  if (caixa && caixa.status === 'fechado') {
+    throw new Erro(409, 'CAIXA_FECHADO_DINHEIRO', 'O caixa de hoje já foi fechado. Registre em pix, cartão ou outro, ou receba o dinheiro amanhã.');
+  }
+}
 /** Sangrias, despesas e reforços lançados no caixa do dia. */
 function movimentosCaixa(data) {
   return db.prepare('SELECT id, tipo, valor, forma, descricao, criado_em FROM movimentos_caixa WHERE data = ? ORDER BY id').all(data)
@@ -437,7 +468,8 @@ function clientesResumo() {
       COALESCE(SUM(CASE WHEN a.status = 'confirmado' AND a.data > :hoje THEN 1 END), 0) AS futuros,
       COALESCE(SUM(CASE WHEN a.status = 'confirmado' AND a.data <= :hoje THEN a.valor_total END), 0) AS total_gasto,
       MAX(CASE WHEN a.status = 'confirmado' AND a.data <= :hoje THEN a.data END) AS ultima_visita,
-      MIN(CASE WHEN a.status = 'confirmado' AND a.data > :hoje THEN a.data END) AS proxima_visita
+      MIN(CASE WHEN a.status = 'confirmado' AND a.data > :hoje THEN a.data END) AS proxima_visita,
+      COALESCE(SUM(CASE WHEN a.status = 'falta' THEN 1 END), 0) AS faltas
     FROM clientes c LEFT JOIN agendamentos a ON a.cliente_id = c.id
     GROUP BY c.id
     ORDER BY visitas DESC, total_gasto DESC, c.nome COLLATE NOCASE`).all({ hoje }).map((c) => ({
@@ -452,6 +484,7 @@ function clientesResumo() {
     total_gasto: centavos(c.total_gasto),
     ultima_visita: c.ultima_visita || null,
     proxima_visita: c.proxima_visita || null,
+    faltas: Number(c.faltas),
   }));
 
   // movimento por dia da semana (0 = domingo), só atendimentos que já aconteceram
@@ -920,6 +953,7 @@ async function api(req, res, url) {
       if (clienteId !== null && (!Number.isInteger(clienteId) || clienteId < 1)) throw new Erro(400, 'DADOS_INVALIDOS');
       db.exec('BEGIN IMMEDIATE');
       try {
+        if (forma === 'dinheiro') exigirCaixaNaoFechado();
         const cli = clienteId ? db.prepare('SELECT id, nome FROM clientes WHERE id = ?').get(clienteId) : null;
         if (clienteId && !cli) throw new Erro(404, 'CLIENTE_NAO_ENCONTRADO', 'Cliente não encontrado.');
         // soma quantidades repetidas do mesmo produto antes de conferir o estoque
@@ -1041,6 +1075,7 @@ async function api(req, res, url) {
         const pago = Number(db.prepare('SELECT COALESCE(SUM(valor), 0) AS total FROM recebimentos_agendamento WHERE agendamento_id = ?').get(id).total || 0);
         const saldo = Math.round((Number(ag.valor_total) - pago) * 100) / 100;
         if (valor > saldo) throw new Erro(400, 'RECEBIMENTO_EXCEDE_SALDO', 'O recebimento não pode ser maior que o saldo pendente.');
+        if (forma === 'dinheiro') exigirCaixaNaoFechado();
         db.prepare('INSERT INTO recebimentos_agendamento (agendamento_id, valor, forma) VALUES (?, ?, ?)').run(id, valor, forma);
         db.exec('COMMIT');
         return json(res, 200, formatarAgendamento(db.prepare('SELECT * FROM agendamentos WHERE id = ?').get(id)));
@@ -1110,17 +1145,26 @@ async function api(req, res, url) {
       const de = url.searchParams.get('de') || '0000-01-01', ate = url.searchParams.get('ate') || '9999-12-31';
       return json(res, 200, db.prepare('SELECT * FROM agendamentos WHERE data BETWEEN ? AND ? ORDER BY data, inicio_min').all(de, ate).map((a) => formatarAgendamento({ ...a })));
     }
-    if (m === 'POST' && rota === 'admin/cancelar') {
+    // cancelar e marcar falta encerram o agendamento do mesmo jeito: estorno opcional e produtos de volta ao estoque
+    if (m === 'POST' && (rota === 'admin/cancelar' || rota === 'admin/falta')) {
       const b = await lerCorpo(req);
       const id = Number(b.id);
       const devolver = b.devolver === true;
+      const falta = rota === 'admin/falta';
       db.exec('BEGIN IMMEDIATE');
       try {
-        const ag = db.prepare('SELECT id, codigo, status FROM agendamentos WHERE id = ?').get(id);
+        const ag = db.prepare('SELECT id, codigo, status, data, inicio_min FROM agendamentos WHERE id = ?').get(id);
         if (!ag) throw new Erro(404, 'AGENDAMENTO_NAO_ENCONTRADO');
+        if (falta) {
+          if (ag.status !== 'confirmado') throw new Erro(409, 'AGENDAMENTO_CANCELADO', 'Só um agendamento confirmado pode ser marcado como falta.');
+          const agora = agoraSP();
+          if (ag.data > agora.data || (ag.data === agora.data && Number(ag.inicio_min) > agora.min)) {
+            throw new Erro(409, 'AINDA_NAO_COMECOU', 'O horário ainda não começou. Para desmarcar antes, use Cancelar horário.');
+          }
+        }
         let devolvidos = 0, estornado = 0;
         if (ag.status === 'confirmado') {
-          db.prepare("UPDATE agendamentos SET status = 'cancelado' WHERE id = ?").run(id);
+          db.prepare('UPDATE agendamentos SET status = ? WHERE id = ?').run(falta ? 'falta' : 'cancelado', id);
           // devolução ao cliente: um estorno por forma de pagamento, lançado no caixa de hoje
           if (devolver) {
             const formas = db.prepare('SELECT forma, SUM(valor) AS total FROM recebimentos_agendamento WHERE agendamento_id = ? GROUP BY forma').all(id);
@@ -1138,7 +1182,7 @@ async function api(req, res, url) {
           for (const it of itens) {
             db.prepare('UPDATE produtos SET estoque = estoque + ? WHERE id = ?').run(it.quantidade, it.produto_id);
             db.prepare("INSERT INTO movimentos_estoque (produto_id, quantidade, tipo, motivo, agendamento_id) VALUES (?, ?, 'entrada', ?, ?)")
-              .run(it.produto_id, it.quantidade, `Devolução: agendamento ${ag.codigo} cancelado`, id);
+              .run(it.produto_id, it.quantidade, `Devolução: agendamento ${ag.codigo} ${falta ? 'com falta' : 'cancelado'}`, id);
             devolvidos += Number(it.quantidade);
           }
         }

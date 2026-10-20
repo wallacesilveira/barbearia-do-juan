@@ -90,6 +90,7 @@
     agendamentos(de, ate) { return this._get(`admin/agendamentos?de=${de}&ate=${ate}`); },
     /** devolver = true lança estorno do que o cliente já pagou. */
     cancelar(id, devolver = false) { return this._post('admin/cancelar', { id, devolver }); },
+    marcarFalta(id, devolver = false) { return this._post('admin/falta', { id, devolver }); },
     salvar(tabela, linha) { return this._post('admin/salvar/' + tabela, linha); },
     excluir(tabela, id) { return this._post('admin/excluir/' + tabela, { id }); },
     salvarConfig(obj) { return this._post('admin/config', obj); },
@@ -189,6 +190,7 @@
         }));
     },
     cancelar(id, devolver = false) { return this._rpc('cancelar_agendamento', { p_agendamento_id: id, p_devolver: devolver }); },
+    marcarFalta(id, devolver = false) { return this._rpc('marcar_falta', { p_agendamento_id: id, p_devolver: devolver }); },
     async clientes() {
       const r = await this._rpc('clientes_resumo', {});
       return { ...r, clientes: r.clientes.map((c) => ({ ...c, total_gasto: Number(c.total_gasto) })) };
